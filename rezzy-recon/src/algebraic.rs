@@ -14,10 +14,10 @@
 
 //! The MSC4521 `algebraic_v1` set reconciliation profile.
 
-use alloc::{string::String, vec, vec::Vec};
 use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
 use core::fmt::Write as _;
 use sha2::{Digest as Sha2Digest, Sha256};
+use std::{string::String, vec, vec::Vec};
 
 pub use super::gf64::mul as gf64_mul;
 
@@ -346,12 +346,12 @@ impl RoomAccumulator {
     pub fn etag<'a>(self, extremity_event_ids: impl IntoIterator<Item = &'a str>) -> String {
         let mut extremities: Vec<&str> = extremity_event_ids.into_iter().collect();
         extremities.sort_unstable();
-        let canonical = alloc::format!(
+        let canonical = format!(
             "[{}]",
             extremities
                 .iter()
                 .map(|s| {
-                    let mut escaped = alloc::string::String::new();
+                    let mut escaped = std::string::String::new();
                     for ch in s.chars() {
                         match ch {
                             '"' => escaped.push_str("\\\""),
@@ -367,9 +367,9 @@ impl RoomAccumulator {
                             c => escaped.push(c),
                         }
                     }
-                    alloc::format!("\"{escaped}\"")
+                    format!("\"{escaped}\"")
                 })
-                .collect::<alloc::vec::Vec<_>>()
+                .collect::<std::vec::Vec<_>>()
                 .join(",")
         );
         let frontier_hash = Sha256::digest(canonical.as_bytes());
@@ -730,7 +730,7 @@ impl SyndromeSketch {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use alloc::vec;
+    use std::vec;
 
     use super::*;
 
@@ -743,11 +743,11 @@ mod tests {
         assert_ne!(v3, v4);
         let expect = ElementHash::from_digest32(digest);
         assert_eq!(
-            ElementHash::from_matrix_event_id_any(&alloc::format!("${v3}")),
+            ElementHash::from_matrix_event_id_any(&std::format!("${v3}")),
             Ok(expect)
         );
         assert_eq!(
-            ElementHash::from_matrix_event_id_any(&alloc::format!("${v4}")),
+            ElementHash::from_matrix_event_id_any(&std::format!("${v4}")),
             Ok(expect)
         );
         assert!(ElementHash::from_matrix_event_id_any("nope").is_err());

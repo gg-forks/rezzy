@@ -665,90 +665,30 @@ fn reject_explicit_output_overlap(options: &Options, files: &[PathBuf]) -> Resul
     Ok(())
 }
 
-fn aggregate(options: &Options) -> Result<rezzy::JsonValue, AppError> {
-    let (files, label_base) = match &options.source {
+/// Resolves the input file list and the label prefix every file is read under.
+fn resolve_inputs(options: &Options) -> Result<(Vec<PathBuf>, &Path), AppError> {
+    match &options.source {
         Source::Files(files) => {
             reject_explicit_output_overlap(options, files)?;
-            (files.clone(), Path::new(""))
+            Ok((files.clone(), Path::new("")))
         }
         Source::Dir { room } => {
             reject_input_output_overlap(options)?;
             let files = input_files(&options.input_dir, room)?;
             reject_explicit_output_overlap(options, &files)?;
-            (files, options.input_dir.as_path())
+            Ok((files, options.input_dir.as_path()))
         }
-    };
-    let inputs: Vec<RawInput> = files
-        .iter()
-        .map(|path| {
-            read_raw_input_with_repair(path, label_base, options.repair_missing_ids, options.quiet)
-        })
-        .collect::<Result<_, _>>()?;
-    let room_version = files
-        .first()
-        .and_then(|path| filename_version(path))
-        .map(|version| version.trim_start_matches("-v").to_owned());
-    let sets: Vec<(String, &[rezzy::JsonValue])> = inputs
-        .iter()
-        .map(|input| (input.label.clone(), input.events.as_slice()))
-        .collect();
-    let merge = merge_event_slices(&sets, room_version.as_deref(), false, options.quiet)?;
-    let mut events = merge.events;
-    sort_events(&mut events)?;
-    let output = output_bytes(&events)?;
-    let sidecar = if options.provenance {
-        Some(build_sidecar(
-            &inputs,
-            &events,
-            room_version.as_deref(),
-            Some(&provenance::sha256_hex(&output)),
-        )?)
-    } else {
-        None
-    };
-    let sidecar_path = provenance::sidecar_path(&options.output);
-    if options.check {
-        return check_published_pair(
-            options,
-            &output,
-            sidecar.as_deref(),
-            &sidecar_path,
-            events.len(),
-        );
     }
-    write_pair_staged(options, &output, sidecar.as_deref(), &sidecar_path)?;
-    let mut result = rezzy::json!({
-        "status": "written",
-        "output": options.output.to_string_lossy().to_string(),
-        "unique_events": events.len(),
-        "input_files": files.len(),
-        "duplicate_event_copies": merge.duplicate_copies,
-    });
-    if let Some(_sidecar) = &sidecar {
-        let _ = result.insert(
-            String::from("metadata_output"),
-            rezzy::json!(sidecar_path.to_string_lossy().to_string()),
-        );
-    }
-    Ok(result)
 }
 
-fn stale_error(path: &Path) -> AppError {
-    AppError::new(
-        ErrorCode::AggregateStale,
-        format!(
-            "{} is stale; rerun without --check to regenerate it",
-            path.display()
-        ),
-    )
-}
-
-fn check_published_pair(
+/// Handles `--check`: reports whether the published aggregate and sidecar
+/// already match the bytes this run would have written, without writing.
+fn check_current(
     options: &Options,
     output: &[u8],
     sidecar: Option<&[u8]>,
     sidecar_path: &Path,
-    unique_events: usize,
+    event_count: usize,
 ) -> Result<rezzy::JsonValue, AppError> {
     let existing_output = fs::read(&options.output).map_err(|e| {
         AppError::new(
@@ -769,11 +709,24 @@ fn check_published_pair(
         if existing_sidecar.as_slice() != sidecar {
             return Err(stale_error(sidecar_path));
         }
+    } else {
+        match fs::symlink_metadata(sidecar_path) {
+            Ok(_) => return Err(stale_error(sidecar_path)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(AppError::new(
+                    ErrorCode::AggregateStale,
+                    format!("cannot check provenance sidecar: {error}"),
+                ));
+            }
+        }
     }
-    Ok(rezzy::json!({"status": "current", "unique_events": unique_events}))
+    Ok(rezzy::json!({"status": "current", "unique_events": event_count}))
 }
 
-fn write_pair_staged(
+/// Stages the aggregate and optional sidecar under unique names, then commits
+/// them, removing staged files if either commit fails.
+fn publish(
     options: &Options,
     output: &[u8],
     sidecar: Option<&[u8]>,
@@ -811,6 +764,90 @@ fn write_pair_staged(
         }
     }
     Ok(())
+}
+
+/// Builds the `status: written` result object for a completed run.
+fn written_result(
+    options: &Options,
+    file_count: usize,
+    unique_events: usize,
+    duplicate_copies: usize,
+    metadata_output: Option<&Path>,
+) -> rezzy::JsonValue {
+    let mut result = rezzy::json!({
+        "status": "written",
+        "output": options.output.to_string_lossy().to_string(),
+        "unique_events": unique_events,
+        "input_files": file_count,
+        "duplicate_event_copies": duplicate_copies,
+    });
+    if let Some(path) = metadata_output {
+        let _ = result.insert(
+            String::from("metadata_output"),
+            rezzy::json!(path.to_string_lossy().to_string()),
+        );
+    }
+    result
+}
+
+fn aggregate(options: &Options) -> Result<rezzy::JsonValue, AppError> {
+    let (files, label_base) = resolve_inputs(options)?;
+    let inputs: Vec<RawInput> = files
+        .iter()
+        .map(|path| {
+            read_raw_input_with_repair(path, label_base, options.repair_missing_ids, options.quiet)
+        })
+        .collect::<Result<_, _>>()?;
+    let room_version = files
+        .first()
+        .and_then(|path| filename_version(path))
+        .map(|version| version.trim_start_matches("-v").to_owned());
+    let sets: Vec<(String, &[rezzy::JsonValue])> = inputs
+        .iter()
+        .map(|input| (input.label.clone(), input.events.as_slice()))
+        .collect();
+    let merge = merge_event_slices(&sets, room_version.as_deref(), false, options.quiet)?;
+    let mut events = merge.events;
+    sort_events(&mut events)?;
+    let output = output_bytes(&events)?;
+    let sidecar = if options.provenance {
+        Some(build_sidecar(
+            &inputs,
+            &events,
+            room_version.as_deref(),
+            Some(&provenance::sha256_hex(&output)),
+        )?)
+    } else {
+        None
+    };
+    let sidecar_path = provenance::sidecar_path(&options.output);
+    if options.check {
+        return check_current(
+            options,
+            &output,
+            sidecar.as_deref(),
+            &sidecar_path,
+            events.len(),
+        );
+    }
+    publish(options, &output, sidecar.as_deref(), &sidecar_path)?;
+    Ok(written_result(
+        options,
+        files.len(),
+        events.len(),
+        merge.duplicate_copies,
+        sidecar.as_ref().map(|_| sidecar_path.as_path()),
+    ))
+}
+
+fn stale_error(path: &Path) -> AppError {
+    AppError::new(
+        ErrorCode::AggregateStale,
+        format!(
+            "{} is stale; rerun without --check to regenerate it",
+            path.display()
+        ),
+    )
 }
 
 fn build_sidecar(
@@ -1758,7 +1795,17 @@ mod tests {
         opts.provenance = false;
         aggregate(&opts).unwrap();
         assert!(root.join("merged/room.jsonl").exists());
-        assert!(!root.join("merged/room.rezzy-meta.jsonl").exists());
+        let sidecar = root.join("merged/room.rezzy-meta.jsonl");
+        assert!(!sidecar.exists());
+
+        // A normal no-provenance publish would remove this stale sidecar, so
+        // check mode must not report the output pair as current while it exists.
+        fs::write(&sidecar, "stale metadata\n").unwrap();
+        opts.check = true;
+        assert_eq!(
+            aggregate(&opts).unwrap_err().code(),
+            ErrorCode::AggregateStale
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }

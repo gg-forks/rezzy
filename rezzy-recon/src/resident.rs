@@ -9,8 +9,8 @@ use super::{
     algebraic::{AlgebraicError, ElementHash, RoomAccumulator},
     gf64,
 };
-use alloc::{string::String, vec::Vec};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use std::{string::String, vec::Vec};
 
 /// Number of estimator strata.
 pub const STRATA_COUNT: usize = 32;

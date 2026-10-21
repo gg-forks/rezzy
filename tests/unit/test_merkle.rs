@@ -361,6 +361,45 @@ fn nul_in_field_name_rejected() {
 }
 
 #[test]
+fn long_field_names_are_rejected_and_kept_whole_in_error_payloads() {
+    // Over-long names are rejected, while error payloads retain their full
+    // input so two names sharing a long prefix stay distinct.
+    let long = "a".repeat(merkle::FieldName::MAX_LEN + 1);
+    assert_eq!(
+        merkle::leaf_hash(&long, b"null").unwrap_err(),
+        MerkleError::InvalidFieldName
+    );
+    assert_eq!(
+        merkle::leaf_hash_bytes(long.as_bytes(), b"null").unwrap_err(),
+        MerkleError::InvalidFieldName
+    );
+    assert_eq!(
+        merkle::component_hash(&long, &json!("v")).unwrap_err(),
+        MerkleError::InvalidFieldName
+    );
+
+    let long_field_name = merkle::FieldName::from(long.as_str());
+    let other_field_name = merkle::FieldName::from(format!("{long}b").as_str());
+    assert_eq!(long_field_name.as_str(), long);
+    assert_ne!(long_field_name, other_field_name);
+}
+
+#[test]
+fn field_name_limit_is_measured_in_utf8_bytes() {
+    let within_limit = "é".repeat(merkle::FieldName::MAX_LEN / 2);
+    let over_limit = format!("{within_limit}é");
+    assert!(merkle::leaf_hash(&within_limit, b"null").is_ok());
+    assert_eq!(
+        merkle::leaf_hash(&over_limit, b"null").unwrap_err(),
+        MerkleError::InvalidFieldName
+    );
+    assert_eq!(
+        merkle::leaf_hash_bytes(over_limit.as_bytes(), b"null").unwrap_err(),
+        MerkleError::InvalidFieldName
+    );
+}
+
+#[test]
 fn valid_field_name_bytes_match_str_leaf_hash() {
     let canonical = br#"{"body":"hello"}"#;
 

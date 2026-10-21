@@ -39,13 +39,13 @@ use crate::state::at::{
     take_finalized_parent, MergeContext, SharedState,
 };
 use crate::{DenseIndex, FastMap, FastSet, HashMap};
-use alloc::collections::VecDeque;
-use alloc::string::{String, ToString};
-use alloc::vec;
-use alloc::vec::Vec;
 use core::borrow::Borrow;
 use core::fmt;
 use core::hash::BuildHasher;
+use std::collections::VecDeque;
+use std::string::{String, ToString};
+use std::vec;
+use std::vec::Vec;
 
 /// Status of a State DAG traversal starting from one or more events.
 pub enum StateDagCompleteness<Id> {
@@ -126,7 +126,9 @@ pub enum StateDagValidationError<Id = String> {
     /// version.  State-DAG traversal requires `prev_state_events` edges
     /// that only exist in room versions 2.2 and later; earlier versions
     /// use auth-chain state resolution and should not call this function.
-    UnsupportedVersionForDag { version: String },
+    UnsupportedVersionForDag {
+        version: crate::basespec::rezzy_types::StateResVersion,
+    },
 }
 
 impl<Id: fmt::Display> fmt::Display for StateDagValidationError<Id> {
@@ -198,7 +200,8 @@ impl<Id: fmt::Display> fmt::Display for StateDagValidationError<Id> {
             Self::UnsupportedVersionForDag { version } => {
                 write!(
                     f,
-                    "State-DAG traversal requires room version 2.2 or later, got {version}"
+                    "State-DAG traversal requires room version 2.2 or later, got {}",
+                    version.debug_name()
                 )
             }
         }
@@ -209,7 +212,8 @@ impl<Id: fmt::Display> fmt::Display for StateDagValidationError<Id> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod validation_error_display_tests {
     use super::StateDagValidationError;
-    use alloc::format;
+    use crate::basespec::rezzy_types::StateResVersion;
+    use std::format;
 
     #[test]
     fn formats_every_state_dag_validation_error() {
@@ -258,6 +262,12 @@ mod validation_error_display_tests {
                     actual_room: None,
                 },
                 "event $c (room !expected:example.org) references event $r without room_id",
+            ),
+            (
+                StateDagValidationError::<&str>::UnsupportedVersionForDag {
+                    version: StateResVersion::V1,
+                },
+                "State-DAG traversal requires room version 2.2 or later, got V1",
             ),
             (
                 StateDagValidationError::ReferencedRejectedEvent {
@@ -317,7 +327,7 @@ impl<Id: fmt::Display> fmt::Display for StateDagError<Id> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod state_dag_error_display_tests {
     use super::{StateDagError, StateDagValidationError};
-    use alloc::{format, vec};
+    use std::{format, vec};
 
     #[test]
     fn formats_every_state_dag_error_variant() {
@@ -349,7 +359,7 @@ mod state_dag_branch_coverage_tests {
     use super::*;
     use crate::basespec::rezzy_types::RoomId;
     use crate::json::Value;
-    use alloc::{format, string::String};
+    use std::{format, string::String};
 
     type TestEvent = LeanEvent<String, Value, String>;
     type TestMap = crate::HashMap<String, TestEvent>;
@@ -370,6 +380,26 @@ mod state_dag_branch_coverage_tests {
             soft_fail: false,
             room_id: None,
         }
+    }
+
+    #[test]
+    fn state_before_rejects_versions_before_v22() {
+        let event = event("$event", Some(""));
+        let events = TestMap::default();
+        let empty_key = String::new();
+        assert!(matches!(
+            compute_state_before_from_dag(&DagInputs::new(
+                &event,
+                &events,
+                StateResVersion::V1,
+                &empty_key,
+            )),
+            Err(StateDagError::Validation(
+                StateDagValidationError::UnsupportedVersionForDag {
+                    version: StateResVersion::V1,
+                }
+            ))
+        ));
     }
 
     #[test]
@@ -663,6 +693,25 @@ mod state_dag_branch_coverage_tests {
             validate_state_dag_ancestors(&missing_parent, &events),
             Err(StateDagError::IncompleteDag { missing_event_ids })
                 if missing_event_ids == vec!["$missing".to_string()]
+        ));
+    }
+
+    #[test]
+    fn state_before_rejects_pre_v2_2_room_versions() {
+        let empty_key = String::new();
+        let event = event("$event", Some(""));
+        let events = TestMap::default();
+
+        assert!(matches!(
+            compute_state_before_from_dag(&DagInputs::new(
+                &event,
+                &events,
+                StateResVersion::V1,
+                &empty_key
+            )),
+            Err(StateDagError::Validation(
+                StateDagValidationError::UnsupportedVersionForDag { version }
+            )) if version == StateResVersion::V1
         ));
     }
 
@@ -1302,9 +1351,7 @@ where
     // chain state resolution and must not call this function.
     if version != StateResVersion::V2_2 {
         return Err(StateDagError::Validation(
-            StateDagValidationError::UnsupportedVersionForDag {
-                version: alloc::format!("{version:?}"),
-            },
+            StateDagValidationError::UnsupportedVersionForDag { version },
         ));
     }
 
@@ -1489,12 +1536,12 @@ where
 ///
 /// # Errors
 /// Returns [`AuthError`] if any calculated auth event was itself rejected (MSC4242 Rule 4.3).
-pub fn derive_auth_events_from_state_dag<Id, C, S, K>(
-    event: &LeanEvent<Id, C, K>,
-    state_before: &SharedState<Id, K>,
+pub fn derive_auth_events_from_state_dag<'a, Id, C, S, K>(
+    event: &'a LeanEvent<Id, C, K>,
+    state_before: &'a SharedState<Id, K>,
     events_map: &HashMap<Id, LeanEvent<Id, C, K>, S>,
     room_version: &str,
-) -> Result<Vec<Id>, AuthError<Id>>
+) -> Result<Vec<Id>, AuthError<'a, Id>>
 where
     Id: EventId,
     C: EventContent,
@@ -1517,12 +1564,12 @@ where
             if let Some(auth_ev) = events_map.get(auth_id) {
                 if auth_ev.rejected {
                     return Err(AuthError::RejectedAuthEvent {
-                        event_id: event.event_id.clone(),
-                        auth_event_id: auth_id.clone(),
+                        event_id: &event.event_id,
+                        auth_event_id: auth_id,
                     });
                 }
             } else {
-                return Err(AuthError::MissingAuthEvent(auth_id.clone()));
+                return Err(AuthError::MissingAuthEvent(auth_id));
             }
             derived_auth.push(auth_id.clone());
         }

@@ -14,7 +14,7 @@ use super::verify::Classified;
 use super::{
     AlgebraicError, ElementHash, RoomAccumulator, SyndromeSketch, MAX_LOCAL_SKETCH_DECODE_CAPACITY,
 };
-use alloc::collections::VecDeque;
+use std::collections::VecDeque;
 
 /// Baseline policy limit for maximum reconciliation rounds in a single exchange.
 ///
@@ -101,8 +101,8 @@ pub struct RemoteDigest {
     pub has_unknown_extremity: bool,
 }
 
-fn normalize_ids<S: AsRef<str>>(ids: &[S]) -> alloc::vec::Vec<&str> {
-    let mut ids: alloc::vec::Vec<&str> = ids.iter().map(AsRef::as_ref).collect();
+fn normalize_ids<S: AsRef<str>>(ids: &[S]) -> std::vec::Vec<&str> {
+    let mut ids: std::vec::Vec<&str> = ids.iter().map(AsRef::as_ref).collect();
     ids.sort_unstable();
     ids.dedup();
     ids
@@ -151,20 +151,20 @@ pub enum ClientAction {
     /// Retry independently decoded bucket sketches.
     BucketSketches {
         /// Buckets to request next.
-        requests: alloc::vec::Vec<BucketRequest>,
+        requests: std::vec::Vec<BucketRequest>,
         /// Roots already recovered from earlier rounds.
-        accumulated_roots: alloc::vec::Vec<u64>,
+        accumulated_roots: std::vec::Vec<u64>,
     },
     /// All requested buckets decoded and are ready for host-side resolution.
     ResolveRoots {
         /// Roots resolved by the reconciliation exchange.
-        roots: alloc::vec::Vec<u64>,
+        roots: std::vec::Vec<u64>,
         /// Nodes `(depth, prefix)` the exchange gave up on, classified as a
         /// collision or responder inconsistency that no retry can fix. The
         /// result is **partial**: the caller MUST apply its per-prefix
         /// fallback (with a bounded TTL) for each of these. Empty when the
         /// result is complete.
-        ladder_failed: alloc::vec::Vec<(u8, u64)>,
+        ladder_failed: std::vec::Vec<(u8, u64)>,
     },
 }
 
@@ -196,7 +196,7 @@ pub fn should_narrow(classified: &Classified, rounds_left: usize) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BucketExchange {
     pending: VecDeque<BucketRequest>,
-    accumulated_roots: alloc::vec::Vec<u64>,
+    accumulated_roots: std::vec::Vec<u64>,
     rounds_emitted: usize,
     max_rounds: usize,
     max_buckets_per_round: usize,
@@ -209,24 +209,24 @@ pub struct BucketExchange {
     /// See `advance`'s doc comment.
     no_progress_rounds: usize,
     /// Nodes that passed phase-1 verification via [`Self::advance_verified`].
-    classified: alloc::vec::Vec<Classified>,
+    classified: std::vec::Vec<Classified>,
     /// Phase-1 verification failures seen so far, for collision detection.
-    failures: alloc::vec::Vec<Phase1Failure>,
+    failures: std::vec::Vec<Phase1Failure>,
     /// Prefixes given up on as collisions or responder inconsistency.
-    ladder_failed: alloc::vec::Vec<(u8, u64)>,
+    ladder_failed: std::vec::Vec<(u8, u64)>,
     /// Responder summaries of failed nodes that may yet be split, kept until
     /// both children have arrived (possibly in different rounds).
-    parents: alloc::vec::Vec<(u8, u64, NodeSummary)>,
+    parents: std::vec::Vec<(u8, u64, NodeSummary)>,
     /// Responder summaries of children still waiting for their sibling.
-    awaiting: alloc::vec::Vec<(u8, u64, NodeSummary)>,
+    awaiting: std::vec::Vec<(u8, u64, NodeSummary)>,
     /// Nodes that failed phase 1 and must be split, never given a bigger
     /// capacity: more syndromes cannot help a collision, and a split helps a
     /// spurious decode as reliably as a bump does.
-    force_split: alloc::vec::Vec<(u8, u64)>,
+    force_split: std::vec::Vec<(u8, u64)>,
     /// Nodes whose population summaries qualify for a single overflow retry.
-    overflow_retry: alloc::vec::Vec<(u8, u64)>,
+    overflow_retry: std::vec::Vec<(u8, u64)>,
     /// Nodes whose summary skew warrants immediate full fan-out.
-    wide_split: alloc::vec::Vec<(u8, u64)>,
+    wide_split: std::vec::Vec<(u8, u64)>,
 }
 
 /// One phase-1 verification failure, recorded for collision detection.
@@ -235,7 +235,7 @@ struct Phase1Failure {
     depth: u8,
     prefix: u64,
     capacity: usize,
-    roots: alloc::vec::Vec<u64>,
+    roots: std::vec::Vec<u64>,
 }
 
 /// Whether `ancestor` is `node` or one of its ancestors.
@@ -261,7 +261,7 @@ fn summarize_descendant_cover(
     parent: (u8, u64),
     summaries: &[(u8, u64, NodeSummary)],
 ) -> Option<(NodeSummary, bool)> {
-    let mut descendants = alloc::vec::Vec::new();
+    let mut descendants = std::vec::Vec::new();
     for &(depth, prefix, summary) in summaries {
         let node = (depth, prefix);
         if depth > parent.0 && covers(parent, node) {
@@ -298,7 +298,7 @@ fn in_node(h64: u64, node: (u8, u64)) -> bool {
 }
 
 /// The roots of `roots` (sorted) that fall inside `node`.
-fn restrict(roots: &[u64], node: (u8, u64)) -> alloc::vec::Vec<u64> {
+fn restrict(roots: &[u64], node: (u8, u64)) -> std::vec::Vec<u64> {
     roots
         .iter()
         .copied()
@@ -310,7 +310,7 @@ impl BucketExchange {
     /// Creates a new pending-queue planner with the default round and wire caps.
     #[must_use]
     pub const fn new(
-        accumulated_roots: alloc::vec::Vec<u64>,
+        accumulated_roots: std::vec::Vec<u64>,
         max_rounds: usize,
         max_buckets_per_round: usize,
         max_aggregate_capacity: usize,
@@ -324,14 +324,14 @@ impl BucketExchange {
             max_aggregate_capacity,
             max_pending_requests: max_rounds.saturating_mul(max_buckets_per_round),
             no_progress_rounds: 0,
-            classified: alloc::vec::Vec::new(),
-            failures: alloc::vec::Vec::new(),
-            ladder_failed: alloc::vec::Vec::new(),
-            parents: alloc::vec::Vec::new(),
-            awaiting: alloc::vec::Vec::new(),
-            force_split: alloc::vec::Vec::new(),
-            overflow_retry: alloc::vec::Vec::new(),
-            wide_split: alloc::vec::Vec::new(),
+            classified: std::vec::Vec::new(),
+            failures: std::vec::Vec::new(),
+            ladder_failed: std::vec::Vec::new(),
+            parents: std::vec::Vec::new(),
+            awaiting: std::vec::Vec::new(),
+            force_split: std::vec::Vec::new(),
+            overflow_retry: std::vec::Vec::new(),
+            wide_split: std::vec::Vec::new(),
         }
     }
 
@@ -359,8 +359,8 @@ impl BucketExchange {
         max_rounds: usize,
         max_buckets_per_round: usize,
         max_aggregate_capacity: usize,
-    ) -> Result<(Self, alloc::vec::Vec<BucketRequest>), AlgebraicError> {
-        let mut all = alloc::vec::Vec::new();
+    ) -> Result<(Self, std::vec::Vec<BucketRequest>), AlgebraicError> {
+        let mut all = std::vec::Vec::new();
         for node in nodes {
             let (depth, prefix) = node.node();
             let parent = BucketRequest::new(depth, prefix, MAX_BUCKET_SKETCH_CAPACITY);
@@ -371,7 +371,7 @@ impl BucketExchange {
         all.sort_unstable_by_key(bucket_range_start);
         crate::triage::validate_bucket_requests(&all)?;
         let mut exchange = Self::new(
-            alloc::vec::Vec::new(),
+            std::vec::Vec::new(),
             max_rounds,
             max_buckets_per_round,
             max_aggregate_capacity,
@@ -452,7 +452,7 @@ impl BucketExchange {
             }
         }
 
-        let candidates: alloc::vec::Vec<(u8, u64)> =
+        let candidates: std::vec::Vec<(u8, u64)> =
             self.parents.iter().map(|&(d, p, _)| (d, p)).collect();
         for parent in candidates {
             // An earlier ladder failure in this loop may have dropped it.
@@ -531,7 +531,7 @@ impl BucketExchange {
         local_candidates: F,
     ) -> Result<ClientAction, AlgebraicError>
     where
-        F: FnMut(u64) -> alloc::vec::Vec<u128>,
+        F: FnMut(u64) -> std::vec::Vec<u128>,
     {
         let (mut batch, verified, rejected) =
             crate::verify::verify_batch(batch, requests, local, remote, local_candidates)?;
@@ -539,7 +539,7 @@ impl BucketExchange {
         // A node whose entire population fits one overflow sketch should not
         // descend the ordinary 32-capacity ladder. Counts are already part of
         // the per-node summaries, so this needs no wire change.
-        let phase_failed: alloc::vec::Vec<_> = rejected
+        let phase_failed: std::vec::Vec<_> = rejected
             .iter()
             .map(|(depth, prefix, _)| (*depth, *prefix))
             .collect();
@@ -624,7 +624,7 @@ impl BucketExchange {
             }
         }
 
-        let verified: alloc::vec::Vec<Classified> = verified
+        let verified: std::vec::Vec<Classified> = verified
             .into_iter()
             .filter(|c| {
                 !self
@@ -788,7 +788,7 @@ impl BucketExchange {
 
     fn queue_failed_nodes(
         &mut self,
-        failed_buckets: alloc::vec::Vec<(u8, u64)>,
+        failed_buckets: std::vec::Vec<(u8, u64)>,
         previous_requests: &[BucketRequest],
         share: u64,
     ) -> Result<(), ClientAction> {
@@ -1098,16 +1098,16 @@ impl ReconciliationClient {
             // and let bucket decoding localize any over-capacity region.
             Err(_) => {
                 return ClientAction::BucketSketches {
-                    requests: alloc::vec![BucketRequest::new(0, 0, MAX_BUCKET_SKETCH_CAPACITY,)],
-                    accumulated_roots: alloc::vec::Vec::new(),
+                    requests: vec![BucketRequest::new(0, 0, MAX_BUCKET_SKETCH_CAPACITY)],
+                    accumulated_roots: Vec::new(),
                 };
             }
         };
 
         if estimated_delta >= SATURATED_DELTA_ESTIMATE {
             return ClientAction::BucketSketches {
-                requests: alloc::vec![BucketRequest::new(0, 0, MAX_BUCKET_SKETCH_CAPACITY)],
-                accumulated_roots: alloc::vec::Vec::new(),
+                requests: vec![BucketRequest::new(0, 0, MAX_BUCKET_SKETCH_CAPACITY)],
+                accumulated_roots: Vec::new(),
             };
         }
 
@@ -1155,7 +1155,7 @@ impl ReconciliationClient {
             return ClientAction::ExtremityDiff;
         }
 
-        let mut requests = alloc::vec::Vec::with_capacity(buckets);
+        let mut requests = std::vec::Vec::with_capacity(buckets);
         let Ok(max_prefix) = u64::try_from(buckets) else {
             return ClientAction::ExtremityDiff;
         };
@@ -1165,7 +1165,7 @@ impl ReconciliationClient {
 
         ClientAction::BucketSketches {
             requests,
-            accumulated_roots: alloc::vec![],
+            accumulated_roots: vec![],
         }
     }
 
@@ -1204,7 +1204,7 @@ impl ReconciliationClient {
     pub fn transition_bucket_batch(
         batch: BucketDecodeBatch,
         previous_requests: &[BucketRequest],
-        mut accumulated_roots: alloc::vec::Vec<u64>,
+        mut accumulated_roots: std::vec::Vec<u64>,
         global_estimate: Option<u64>,
         aggregate_cap: usize,
     ) -> ClientAction {
@@ -1214,7 +1214,7 @@ impl ReconciliationClient {
         if batch.failed_buckets.is_empty() {
             return ClientAction::ResolveRoots {
                 roots: accumulated_roots,
-                ladder_failed: alloc::vec::Vec::new(),
+                ladder_failed: std::vec::Vec::new(),
             };
         }
 
@@ -1229,7 +1229,7 @@ impl ReconciliationClient {
         let share = unaccounted.checked_div(failed_count).unwrap_or(0);
         let aggregate_limit = aggregate_cap;
         let mut total = 0_usize;
-        let mut requests = alloc::vec::Vec::with_capacity(batch.failed_buckets.len());
+        let mut requests = std::vec::Vec::with_capacity(batch.failed_buckets.len());
 
         for (depth, prefix) in batch.failed_buckets {
             let Ok(next_requests) =
@@ -1279,7 +1279,7 @@ impl ReconciliationClient {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use alloc::vec;
+    use std::vec;
 
     use super::*;
 
@@ -1341,9 +1341,9 @@ mod tests {
     /// requests they were submitted under.
     fn failed_bucket_fanout(
         count: usize,
-    ) -> (alloc::vec::Vec<(u8, u64)>, alloc::vec::Vec<BucketRequest>) {
-        let mut failed_buckets = alloc::vec::Vec::with_capacity(count);
-        let mut previous_requests = alloc::vec::Vec::with_capacity(count);
+    ) -> (std::vec::Vec<(u8, u64)>, std::vec::Vec<BucketRequest>) {
+        let mut failed_buckets = std::vec::Vec::with_capacity(count);
+        let mut previous_requests = std::vec::Vec::with_capacity(count);
         for prefix in 0..count {
             let prefix = u64::try_from(prefix).expect("bucket fanout prefix fits in u64");
             failed_buckets.push((7, prefix));
@@ -1658,7 +1658,7 @@ mod tests {
             .expect("small-capacity buckets should retry");
 
         assert_eq!(
-            next_requests.into_iter().collect::<alloc::vec::Vec<_>>(),
+            next_requests.into_iter().collect::<std::vec::Vec<_>>(),
             vec![BucketRequest::new(8, 2, 19)]
         );
     }
@@ -2074,7 +2074,7 @@ mod tests {
             requests
                 .iter()
                 .map(|r| (r.depth, r.prefix))
-                .collect::<alloc::vec::Vec<_>>(),
+                .collect::<std::vec::Vec<_>>(),
             vec![(1, 0), (1, 1)],
             "children, not the same node at a larger capacity"
         );
@@ -2266,7 +2266,7 @@ mod tests {
             requests
                 .iter()
                 .map(|r| (r.depth, r.prefix))
-                .collect::<alloc::vec::Vec<_>>(),
+                .collect::<std::vec::Vec<_>>(),
             vec![(3, 2), (3, 3)]
         );
         assert_eq!(exchange.rounds_emitted(), 1);
