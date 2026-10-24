@@ -375,3 +375,22 @@ through the cracks.
   `get_redacts()`.
 - `screened` delta list unordered; `MSC3089` → `MSC3083` typos;
   `reference_hash`/ `compute_content_hash` `Result` + `expect` coexistence.
+
+## 24 Oct 2026 (HAMT delta benchmark, `benches/db/hamt_delta.rs`)
+
+Trees are fully in memory; each result is checked against the reference diff.
+
+- `isolate_delta` and `diff_hamt_nodes` were within measurement noise of each
+  other: no measurable wrapper overhead in this run. This does not establish
+  zero overhead.
+- Cost grows with edit count and varies modestly across the tested state sizes.
+  This is not a precise complexity claim.
+- Limits: there is no before/after comparison for the leaf/subtree fix
+  (`4def5acf`), and nothing confirms that any edit triggered the cross-kind
+  path. Fifteen changed entries for ten edits follows from a mix of overwrites
+  and inserts; it does not show a leaf split.
+
+To measure the fix's performance cost, compare two cases at the same state size
+and edit count: one without leaf/subtree transitions and one that triggers them.
+Build both trees outside the timed loop, verify both deltas against an oracle,
+and confirm the second case exercises the cross-kind path.
