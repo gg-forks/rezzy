@@ -232,7 +232,14 @@ where
 
     for slot in set_bits(leaf_a_sub_b) {
         diff_leaf_subtree(
-            (node_a, node_b, d_a, n_b, slot, true),
+            &CrossKindSlot {
+                leaf_node: node_a,
+                subtree_node: node_b,
+                leaf_datamap: d_a,
+                subtree_nodemap: n_b,
+                slot,
+                leaf_is_a: true,
+            },
             added,
             removed,
             resolver,
@@ -242,7 +249,14 @@ where
 
     for slot in set_bits(sub_a_leaf_b) {
         diff_leaf_subtree(
-            (node_b, node_a, d_b, n_a, slot, false),
+            &CrossKindSlot {
+                leaf_node: node_b,
+                subtree_node: node_a,
+                leaf_datamap: d_b,
+                subtree_nodemap: n_a,
+                slot,
+                leaf_is_a: false,
+            },
             added,
             removed,
             resolver,
@@ -256,23 +270,33 @@ where
 /// Diffs a leaf on one side against a child subtree on the other side.
 /// Entries in the subtree matching the leaf exactly cancel; all other
 /// subtree entries belong to the subtree side's delta direction.
+struct CrossKindSlot<'a, K, V> {
+    leaf_node: &'a NodePtr<K, V>,
+    subtree_node: &'a NodePtr<K, V>,
+    leaf_datamap: u32,
+    subtree_nodemap: u32,
+    slot: usize,
+    leaf_is_a: bool,
+}
+
 fn diff_leaf_subtree<K: DeltaElem, V: DeltaElem, E>(
-    (leaf_node, subtree_node, leaf_datamap, subtree_nodemap, slot, leaf_is_a): (
-        &NodePtr<K, V>,
-        &NodePtr<K, V>,
-        u32,
-        u32,
-        usize,
-        bool,
-    ),
+    cross: &CrossKindSlot<'_, K, V>,
     added: &mut Vec<(K, V)>,
     removed: &mut Vec<(K, V)>,
     resolver: &mut impl FnMut(&StructuralHash) -> Result<NodePtr<K, V>, E>,
     depth: usize,
 ) -> Result<(), HamtTraversalError<E>> {
-    let (key, value) = &leaf_node.leaves[map_index(leaf_datamap, slot)];
-    let child = resolve_only_child(subtree_node, subtree_nodemap, slot, resolver)?;
-    let subtree_delta = if leaf_is_a {
+    let CrossKindSlot {
+        leaf_node,
+        subtree_node,
+        leaf_datamap,
+        subtree_nodemap,
+        slot,
+        leaf_is_a,
+    } = cross;
+    let (key, value) = &leaf_node.leaves[map_index(*leaf_datamap, *slot)];
+    let child = resolve_only_child(subtree_node, *subtree_nodemap, *slot, resolver)?;
+    let subtree_delta = if *leaf_is_a {
         &mut *added
     } else {
         &mut *removed
@@ -288,7 +312,7 @@ fn diff_leaf_subtree<K: DeltaElem, V: DeltaElem, E>(
         }
     })?;
     if !unchanged {
-        let leaf_delta = if leaf_is_a {
+        let leaf_delta = if *leaf_is_a {
             &mut *removed
         } else {
             &mut *added
