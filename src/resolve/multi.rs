@@ -253,7 +253,7 @@ where
 }
 
 /// Like [`resolve_state_maps`], but reuses a caller-supplied MSC4297
-/// [`RangePrefilterReachability`](crate::resolve::reachability::RangePrefilterReachability)
+/// [`RangePrefilterReachability`]
 /// index built over a superset of `event_context` (e.g. the whole room),
 /// avoiding a per-call index rebuild.
 ///
