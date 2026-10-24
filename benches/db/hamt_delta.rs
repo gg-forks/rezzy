@@ -18,7 +18,8 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use rezzy::hamt::delta::diff_hamt_nodes;
+use rezzy::hamt::delta::{diff_hamt_nodes, isolate_delta};
+use rezzy::incremental::LtHash;
 use rezzy::hamt::hash::StructuralHash;
 use rezzy::hamt::{self, HamtNode, NodeRef};
 
@@ -181,6 +182,32 @@ fn run_one(label: &str, a: &Node, b: &Node, store: &Store, reference: &Delta, re
     );
 }
 
+/// Times fully resident [`isolate_delta`] (the public entry point that wraps
+/// `diff_hamt_nodes` with the lattice/root short-circuit) from `a` to `b`.
+/// Both lattices are `ZERO`; the roots differ, so the short-circuit never
+/// fires and the full diff runs. The result is checked against `reference`
+/// before timing.
+///
+/// # Panics
+/// Panics if `reps` is zero, the diff fails, or the delta differs from `reference`.
+fn run_isolate_delta(a: &Node, b: &Node, reference: &Delta, reps: u32, n: usize, delta: usize) {
+    let lattice = LtHash::ZERO;
+    let mut none = |_: &StructuralHash| -> Result<Node, ()> { Err(()) };
+    let got = isolate_delta(a, &lattice, b, &lattice, &mut none).expect("isolate_delta");
+    assert_eq!(&got, reference, "isolate_delta mismatch (n={n}, d={delta})");
+
+    let start = Instant::now();
+    for _ in 0..reps {
+        let mut none = |_: &StructuralHash| -> Result<Node, ()> { Err(()) };
+        black_box(isolate_delta(a, &lattice, b, &lattice, &mut none).expect("isolate_delta"));
+    }
+    let per = start.elapsed() / reps;
+    println!(
+        "  isolate_delta in-memory (n={n}, d={delta}): {:.1} ns/op",
+        per.as_nanos() as f64
+    );
+}
+
 /// Reports fully resident and RAM-resolved diff timings for an `n`-entry base
 /// with `delta` mutations, varying the number of cached child layers.
 ///
@@ -204,6 +231,8 @@ fn bench(n: usize, delta: usize) {
         &reference,
         reps,
     );
+
+    run_isolate_delta(&base, &next, &reference, reps, n, delta);
 
     let mut store = Store::new();
     store_all(&base, &mut store);

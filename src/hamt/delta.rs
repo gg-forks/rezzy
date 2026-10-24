@@ -159,7 +159,15 @@ where
     let d_a = node_a.datamap;
     let d_b = node_b.datamap;
 
-    let union = d_a | d_b;
+    let n_a = node_a.nodemap;
+    let n_b = node_b.nodemap;
+    // A leaf can become a subtree when an insertion shares its slot. Handle
+    // those slots together so an unchanged leaf is not reported twice.
+    let leaf_a_sub_b = d_a & n_b;
+    let sub_a_leaf_b = n_a & d_b;
+    let cross = leaf_a_sub_b | sub_a_leaf_b;
+
+    let union = (d_a | d_b) & !cross;
     for slot in set_bits(union) {
         let bit = 1 << slot;
         let in_a = (d_a & bit) != 0;
@@ -191,10 +199,7 @@ where
     }
 
     // Traverse nodemaps
-    let n_a = node_a.nodemap;
-    let n_b = node_b.nodemap;
-
-    for (slot, in_a, in_b) in union_nodemaps(n_a, n_b) {
+    for (slot, in_a, in_b) in union_nodemaps(n_a & !cross, n_b & !cross) {
         if in_a && in_b {
             if let Some(children) = resolve_changed_pair(node_a, node_b, n_a, n_b, slot, resolver)?
             {
@@ -223,6 +228,42 @@ where
         walk_subtree(&res_b, resolver, next_depth, &mut |n| {
             added.extend(n.leaves.iter().cloned());
         })?;
+    }
+
+    for slot in set_bits(leaf_a_sub_b) {
+        let (key, value) = &node_a.leaves[map_index(d_a, slot)];
+        let child = resolve_only_child(node_b, n_b, slot, resolver)?;
+        let mut unchanged = false;
+        walk_subtree(&child, resolver, next_depth, &mut |node| {
+            for (other_key, other_value) in &node.leaves {
+                if other_key == key && other_value == value {
+                    unchanged = true;
+                } else {
+                    added.push((other_key.clone(), other_value.clone()));
+                }
+            }
+        })?;
+        if !unchanged {
+            removed.push((key.clone(), value.clone()));
+        }
+    }
+
+    for slot in set_bits(sub_a_leaf_b) {
+        let (key, value) = &node_b.leaves[map_index(d_b, slot)];
+        let child = resolve_only_child(node_a, n_a, slot, resolver)?;
+        let mut unchanged = false;
+        walk_subtree(&child, resolver, next_depth, &mut |node| {
+            for (other_key, other_value) in &node.leaves {
+                if other_key == key && other_value == value {
+                    unchanged = true;
+                } else {
+                    removed.push((other_key.clone(), other_value.clone()));
+                }
+            }
+        })?;
+        if !unchanged {
+            added.push((key.clone(), value.clone()));
+        }
     }
 
     Ok(())
