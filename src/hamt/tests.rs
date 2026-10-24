@@ -3977,6 +3977,13 @@ fn test_isolate_delta_leaf_subtree_transition() {
     let changed_root = rebuild_node(key, 0, 1, vec![], vec![NodeRef::Resolved(changed_child)]);
     assert_delta_matches_oracle(&leaf_root, &changed_root);
     assert_delta_matches_oracle(&changed_root, &leaf_root);
+
+    // The leaf's key is absent from the subtree: the leaf is wholly removed
+    // (or added) and every subtree entry belongs to the other side.
+    let absent_child = rebuild_node(key, 0b11, 0, vec![(2_u32, 20_u32), (3_u32, 30_u32)], vec![]);
+    let absent_root = rebuild_node(key, 0, 1, vec![], vec![NodeRef::Resolved(absent_child)]);
+    assert_delta_matches_oracle(&leaf_root, &absent_root);
+    assert_delta_matches_oracle(&absent_root, &leaf_root);
 }
 
 /// A single HAMT node deliberately built to straddle all three bitmask
