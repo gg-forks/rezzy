@@ -231,41 +231,70 @@ where
     }
 
     for slot in set_bits(leaf_a_sub_b) {
-        let (key, value) = &node_a.leaves[map_index(d_a, slot)];
-        let child = resolve_only_child(node_b, n_b, slot, resolver)?;
-        let mut unchanged = false;
-        walk_subtree(&child, resolver, next_depth, &mut |node| {
-            for (other_key, other_value) in &node.leaves {
-                if other_key == key && other_value == value {
-                    unchanged = true;
-                } else {
-                    added.push((other_key.clone(), other_value.clone()));
-                }
-            }
-        })?;
-        if !unchanged {
-            removed.push((key.clone(), value.clone()));
-        }
+        diff_leaf_subtree(
+            (node_a, node_b, d_a, n_b, slot, true),
+            added,
+            removed,
+            resolver,
+            next_depth,
+        )?;
     }
 
     for slot in set_bits(sub_a_leaf_b) {
-        let (key, value) = &node_b.leaves[map_index(d_b, slot)];
-        let child = resolve_only_child(node_a, n_a, slot, resolver)?;
-        let mut unchanged = false;
-        walk_subtree(&child, resolver, next_depth, &mut |node| {
-            for (other_key, other_value) in &node.leaves {
-                if other_key == key && other_value == value {
-                    unchanged = true;
-                } else {
-                    removed.push((other_key.clone(), other_value.clone()));
-                }
-            }
-        })?;
-        if !unchanged {
-            added.push((key.clone(), value.clone()));
-        }
+        diff_leaf_subtree(
+            (node_b, node_a, d_b, n_a, slot, false),
+            added,
+            removed,
+            resolver,
+            next_depth,
+        )?;
     }
 
+    Ok(())
+}
+
+/// Diffs a leaf on one side against a child subtree on the other side.
+/// Entries in the subtree matching the leaf exactly cancel; all other
+/// subtree entries belong to the subtree side's delta direction.
+fn diff_leaf_subtree<K: DeltaElem, V: DeltaElem, E>(
+    (leaf_node, subtree_node, leaf_datamap, subtree_nodemap, slot, leaf_is_a): (
+        &NodePtr<K, V>,
+        &NodePtr<K, V>,
+        u32,
+        u32,
+        usize,
+        bool,
+    ),
+    added: &mut Vec<(K, V)>,
+    removed: &mut Vec<(K, V)>,
+    resolver: &mut impl FnMut(&StructuralHash) -> Result<NodePtr<K, V>, E>,
+    depth: usize,
+) -> Result<(), HamtTraversalError<E>> {
+    let (key, value) = &leaf_node.leaves[map_index(leaf_datamap, slot)];
+    let child = resolve_only_child(subtree_node, subtree_nodemap, slot, resolver)?;
+    let subtree_delta = if leaf_is_a {
+        &mut *added
+    } else {
+        &mut *removed
+    };
+    let mut unchanged = false;
+    walk_subtree(&child, resolver, depth, &mut |node| {
+        for (other_key, other_value) in &node.leaves {
+            if other_key == key && other_value == value {
+                unchanged = true;
+            } else {
+                subtree_delta.push((other_key.clone(), other_value.clone()));
+            }
+        }
+    })?;
+    if !unchanged {
+        let leaf_delta = if leaf_is_a {
+            &mut *removed
+        } else {
+            &mut *added
+        };
+        leaf_delta.push((key.clone(), value.clone()));
+    }
     Ok(())
 }
 
