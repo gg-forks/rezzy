@@ -14,16 +14,7 @@
 //! Each fetch count is printed alongside the time.
 //!
 //! Run with: `cargo bench --bench rezzy -- hamt_delta`
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    clippy::items_after_statements,
-    clippy::doc_markdown
-)]
 
-use std::collections::HashMap;
-use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -31,6 +22,7 @@ use rezzy::hamt::delta::diff_hamt_nodes;
 use rezzy::hamt::hash::StructuralHash;
 use rezzy::hamt::{self, HamtNode, NodeRef};
 
+use crate::common::prelude::*;
 use crate::common::{make_string_entries, unreachable_resolver};
 
 type Key = String;

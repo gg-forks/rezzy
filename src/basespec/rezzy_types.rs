@@ -3531,18 +3531,8 @@ impl LeanEvent<String, Value, String> {
         let event_id = if let Some(id) = value.get(FIELD_EVENT_ID).and_then(|v| v.as_str()) {
             String::from(id)
         } else if let Some(ver) = room_version {
-            let digest = reference_hash_digest(value, ver)?;
-            let mut encoded = [0_u8; 43];
-            let length = hash_base64_engine(ver)
-                .encode_slice(digest, &mut encoded)
-                .map_err(|error| alloc::format!("failed to encode reference hash: {error}"))?;
-            let encoded = core::str::from_utf8(&encoded[..length]).map_err(|error| {
-                alloc::format!("reference hash encoder returned invalid UTF-8: {error}")
-            })?;
-            let mut id = String::with_capacity(44);
-            id.push('$');
-            id.push_str(encoded);
-            id
+            let hash = reference_hash(value, ver)?;
+            alloc::format!("${hash}")
         } else {
             return Err(String::from(
                 "event_id is required; pass `room_version` to `from_value` to derive it via the reference hash",

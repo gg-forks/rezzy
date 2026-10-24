@@ -863,6 +863,23 @@ fn test_resolve_merge_fast_path_hashed_update_arm() {
     );
 }
 
+fn four_event_dag() -> HashMap<String, LeanEvent> {
+    dag_a_lines(&[
+        MEMBER_B_A,
+        r#"{"event_id":"C","type":"m.room.member","state_key":"@y:x","sender":"@x:x","depth":3,"content":{"membership":"join"},"prev_events":["B"],"auth_events":["A","B"]}"#,
+        r#"{"event_id":"D","type":"m.room.name","state_key":"","sender":"@x:x","depth":4,"content":{"name":"room"},"prev_events":["C"],"auth_events":["A","B"]}"#,
+    ])
+}
+
+fn state_to_btree<Id: ToString, K: AsRef<str>>(
+    state: std::collections::BTreeMap<(rezzy::EventType, K), Id>,
+) -> std::collections::BTreeMap<(String, String), String> {
+    state
+        .into_iter()
+        .map(|((et, k), id)| ((et.to_string(), k.as_ref().to_string()), id.to_string()))
+        .collect()
+}
+
 /// `InternedKey` is a drop-in `K` for the resolution pipeline: converting
 /// events at the ingest boundary via `into_interned_state_key` and resolving
 /// with `SharedStateInterned` produces identical state to the plain-`String`
@@ -870,11 +887,7 @@ fn test_resolve_merge_fast_path_hashed_update_arm() {
 /// no behavioral difference.
 #[test]
 fn test_interned_key_matches_string_path() {
-    let events_map = dag_a_lines(&[
-        MEMBER_B_A,
-        r#"{"event_id":"C","type":"m.room.member","state_key":"@y:x","sender":"@x:x","depth":3,"content":{"membership":"join"},"prev_events":["B"],"auth_events":["A","B"]}"#,
-        r#"{"event_id":"D","type":"m.room.name","state_key":"","sender":"@x:x","depth":4,"content":{"name":"room"},"prev_events":["C"],"auth_events":["A","B"]}"#,
-    ]);
+    let events_map = four_event_dag();
 
     let interned_map: HashMap<
         String,
@@ -893,14 +906,8 @@ fn test_interned_key_matches_string_path() {
     )
     .unwrap();
 
-    let str_keyed: std::collections::BTreeMap<(String, String), String> = str_state
-        .into_iter()
-        .map(|((et, k), id)| ((et.to_string(), k), id))
-        .collect();
-    let interned_keyed: std::collections::BTreeMap<(String, String), String> = interned_state
-        .into_iter()
-        .map(|((et, k), id)| ((et.to_string(), k.as_ref().to_string()), id))
-        .collect();
+    let str_keyed = state_to_btree(str_state);
+    let interned_keyed = state_to_btree(interned_state);
 
     // Multiple distinct state keys (two m.room.member entries plus create and
     // name) so this is a real cross-check of the interned path against the
@@ -931,11 +938,7 @@ fn test_interned_key_matches_string_path() {
 /// across the map key, `event_id`, `prev_events` and `auth_events`.
 #[test]
 fn test_intern_events_matches_string_path_and_shares_allocations() {
-    let events_map = dag_a_lines(&[
-        MEMBER_B_A,
-        r#"{"event_id":"C","type":"m.room.member","state_key":"@y:x","sender":"@x:x","depth":3,"content":{"membership":"join"},"prev_events":["B"],"auth_events":["A","B"]}"#,
-        r#"{"event_id":"D","type":"m.room.name","state_key":"","sender":"@x:x","depth":4,"content":{"name":"room"},"prev_events":["C"],"auth_events":["A","B"]}"#,
-    ]);
+    let events_map = four_event_dag();
     let fast = rezzy::intern_events(events_map.values().cloned());
 
     let str_state = state_at_d(&events_map).unwrap();
@@ -946,14 +949,8 @@ fn test_intern_events_matches_string_path_and_shares_allocations() {
         &rezzy::InternedKey::default(),
     )
     .unwrap();
-    let fast_keyed: std::collections::BTreeMap<(String, String), String> = fast_state
-        .into_iter()
-        .map(|((et, k), id)| ((et.to_string(), k.as_ref().to_string()), id.to_string()))
-        .collect();
-    let str_keyed: std::collections::BTreeMap<(String, String), String> = str_state
-        .into_iter()
-        .map(|((et, k), id)| ((et.to_string(), k), id))
-        .collect();
+    let fast_keyed = state_to_btree(fast_state);
+    let str_keyed = state_to_btree(str_state);
     assert_eq!(fast_keyed, str_keyed);
 
     // One allocation per id: the map key, the event's own id, and the

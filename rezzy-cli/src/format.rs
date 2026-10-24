@@ -2085,12 +2085,13 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)]
     fn test_hamt_live_walk_multi_parent_fork_non_first_parent_winner() {
+        let sender = "@alice:example.com";
         let ev_create: LeanEvent = LeanEvent {
             event_id: "$create".into(),
             event_type: "m.room.create".into(),
             state_key: Some(String::new()),
-            sender: "@alice:example.com".into(),
-            content: rezzy::json!({ "creator": "@alice:example.com" }),
+            sender: sender.into(),
+            content: rezzy::json!({ "creator": sender }),
             depth: 1,
             origin_server_ts: 10,
             ..Default::default()

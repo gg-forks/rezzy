@@ -492,3 +492,49 @@ pub fn lthash_of(state: &HashMap<StateKey, String>) -> rezzy::incremental::LtHas
     }
     lt
 }
+
+/// Random alphanumeric event ID of `len` bytes behind a `$` prefix.
+pub fn random_event_id(len: usize, rng: &mut Xorshift128) -> String {
+    let mut s = String::with_capacity(len + 2);
+    s.push('$');
+    for i in 0..len {
+        let c = ((rng.next_u64() >> (i % 8)) & 0xFF) as u8;
+        if c.is_ascii_alphanumeric() {
+            s.push(c as char);
+        } else {
+            s.push('a');
+        }
+    }
+    s
+}
+
+/// Builds a live state map, its running [`rezzy::incremental::LtHash`], and a
+/// deterministic stream of `steps` mutations.
+pub fn prepare_incremental_state(
+    base_entries: Vec<(StateKey, String)>,
+    steps: usize,
+) -> (
+    HashMap<StateKey, String>,
+    rezzy::incremental::LtHash,
+    Vec<StateOp>,
+) {
+    let state: HashMap<StateKey, String> = base_entries.into_iter().collect();
+    let lt = lthash_of(&state);
+    let mut rng = Xorshift128::new(0xBEEF);
+    let existing_keys: Vec<StateKey> = state.keys().cloned().collect();
+    let ops = generate_state_ops(&mut rng, &existing_keys, steps);
+    (state, lt, ops)
+}
+
+/// Generates a custom MSC state key `(EventType::from("org.example.msc{idx}"), "key{idx}")`
+/// scaled to the fixture size `n`.
+pub fn custom_msc_key(
+    rng: &mut Xorshift128,
+    n: usize,
+) -> (rezzy::basespec::event_types::EventType, String) {
+    let idx = rng.next_u64() % ((n.max(1) as u64) * 10);
+    (
+        rezzy::basespec::event_types::EventType::from(format!("org.example.msc{idx}")),
+        format!("key{idx}"),
+    )
+}

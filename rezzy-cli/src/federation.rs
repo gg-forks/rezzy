@@ -1110,6 +1110,26 @@ fn append_attempts(
     dag_request: &DagRequest<'_>,
     attempts: &[Attempt],
 ) -> Result<(), AppError> {
+    append_attempt_records(
+        path,
+        round,
+        dag_request.origin,
+        dag_request.destination,
+        dag_request.room_id,
+        tried,
+        attempts,
+    )
+}
+
+fn append_attempt_records(
+    path: &Path,
+    round: u32,
+    origin: &str,
+    destination: &str,
+    room_id: &str,
+    tried: &HashSet<String>,
+    attempts: &[Attempt],
+) -> Result<(), AppError> {
     if attempts.is_empty() {
         return Ok(());
     }
@@ -1121,15 +1141,7 @@ fn append_attempts(
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
     for a in attempts {
-        let line = attempt_record(
-            when,
-            round,
-            dag_request.room_id,
-            dag_request.origin,
-            dag_request.destination,
-            tried,
-            a,
-        );
+        let line = attempt_record(when, round, room_id, origin, destination, tried, a);
         let text = rezzy::json::write_string_value(&line)
             .map_err(|e| AppError::new(ErrorCode::MalformedJson, e.to_string()))?;
         writeln!(file, "{text}")?;
@@ -1611,22 +1623,8 @@ pub(super) fn get_remote_events_by_id(
         if !found && state.unreachable.is_none() {
             state.unresolved.push(id.clone());
         }
-        for pdu in pdus {
-            if !write_dag_event(&pdu, dag_request.room_version, max, &mut state)? {
-                state.unresolved.extend(
-                    dag_request
-                        .starts
-                        .iter()
-                        .skip(index.saturating_add(1))
-                        .filter(|remaining| !known.is_some_and(|held| held.contains(*remaining)))
-                        .cloned(),
-                );
-                break 'ids;
-            }
-        }
-        state.output_writer.flush()?;
-        if let Some(error) = state.unreachable.take() {
-            state.unresolved.extend(
+        let extend_remaining = |unresolved: &mut Vec<String>| {
+            unresolved.extend(
                 dag_request
                     .starts
                     .iter()
@@ -1634,6 +1632,16 @@ pub(super) fn get_remote_events_by_id(
                     .filter(|remaining| !known.is_some_and(|held| held.contains(*remaining)))
                     .cloned(),
             );
+        };
+        for pdu in pdus {
+            if !write_dag_event(&pdu, dag_request.room_version, max, &mut state)? {
+                extend_remaining(&mut state.unresolved);
+                break 'ids;
+            }
+        }
+        state.output_writer.flush()?;
+        if let Some(error) = state.unreachable.take() {
+            extend_remaining(&mut state.unresolved);
             if state.event_count == 0 {
                 return Err(error);
             }
@@ -2334,26 +2342,15 @@ fn append_auth_attempt(
     auth_tried: &HashSet<String>,
     attempt: &Attempt,
 ) -> Result<(), AppError> {
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
-    let when = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs());
-    let line = attempt_record(
-        when,
+    append_attempt_records(
+        path,
         round,
-        room_id,
         origin,
         destination,
+        room_id,
         auth_tried,
-        attempt,
-    );
-    let encoded = rezzy::json::write_string_value(&line)
-        .map_err(|error| AppError::new(ErrorCode::MalformedJson, error.to_string()))?;
-    writeln!(file, "{encoded}")?;
-    Ok(())
+        std::slice::from_ref(attempt),
+    )
 }
 
 /// Builds a request record with `when` in Unix seconds and duration in
@@ -2428,6 +2425,25 @@ fn write_frontier_checkpoint(path: &Path, frontier: &[String]) -> Result<(), App
 mod tests {
     use super::{domain_env_suffix, parse_signing_key, AppError, ErrorCode, FetchFailures};
 
+    fn test_dag_request<'a>(
+        starts: &'a [String],
+        output: &'a std::path::Path,
+        emit_missing: Option<&'a std::path::Path>,
+    ) -> super::DagRequest<'a> {
+        super::DagRequest {
+            origin: "o",
+            destination: "d",
+            room_id: "!r",
+            starts,
+            room_version: "12",
+            limit: -1,
+            output,
+            key_path: None,
+            no_fallback: false,
+            emit_missing,
+        }
+    }
+
     #[test]
     fn crawl_skips_known_events_and_does_not_requeue_their_ids() {
         use std::collections::HashSet;
@@ -2436,18 +2452,7 @@ mod tests {
         let out = dir.join("dag.jsonl");
         let starts = vec!["$new".to_owned()];
         let known: HashSet<String> = HashSet::from(["$have".to_owned()]);
-        let request = super::DagRequest {
-            origin: "o",
-            destination: "d",
-            room_id: "!r",
-            starts: &starts,
-            room_version: "12",
-            limit: -1,
-            output: &out,
-            key_path: None,
-            no_fallback: false,
-            emit_missing: None,
-        };
+        let request = test_dag_request(&starts, &out, None);
         let (mut state, max) = super::initialize_dag(&request, Some(&known)).unwrap();
         // A fetched event whose parents are one we hold and one we do not.
         let fetched = rezzy::json!({"event_id": "$new", "prev_events": ["$have", "$gap"]});
@@ -2504,18 +2509,7 @@ mod tests {
         let out = dir.join("dag.jsonl");
         let starts = vec!["$a".to_owned()];
         let alias = dir.join(".").join("dag.jsonl");
-        let request = super::DagRequest {
-            origin: "o",
-            destination: "d",
-            room_id: "!r",
-            starts: &starts,
-            room_version: "12",
-            limit: -1,
-            output: &out,
-            key_path: None,
-            no_fallback: false,
-            emit_missing: Some(&alias),
-        };
+        let request = test_dag_request(&starts, &out, Some(&alias));
         assert!(super::initialize_dag(&request, None).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }

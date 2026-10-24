@@ -50,6 +50,7 @@ use crate::basespec::event_types::EventType;
 use crate::basespec::rezzy_types::{
     EventContent, EventId, EventProvider, LeanEvent, StateKey, StateResVersion,
 };
+use crate::resolve::reachability::RangePrefilterReachability;
 use crate::state::at::SharedState;
 use crate::state::diff::{StateDiff, StateDiffEntry};
 use crate::{FastMap, FastSet, HashMap};
@@ -264,7 +265,7 @@ pub fn resolve_state_maps_with_reachability<Id, C, S>(
     state_maps: &[SharedState<Id>],
     event_context: &HashMap<Id, LeanEvent<Id, C>, S>,
     version: StateResVersion,
-    reachability: &crate::resolve::reachability::RangePrefilterReachability<Id>,
+    reachability: &RangePrefilterReachability<Id>,
 ) -> SharedState<Id>
 where
     Id: EventId,
@@ -304,7 +305,7 @@ pub fn resolve_state_maps_cached<Id, C, S>(
     state_maps: &[SharedState<Id>],
     event_context: &HashMap<Id, LeanEvent<Id, C>, S>,
     version: StateResVersion,
-    reachability: &crate::resolve::reachability::RangePrefilterReachability<Id>,
+    reachability: &RangePrefilterReachability<Id>,
     caches: &mut ForkResolveCaches<Id, C>,
 ) -> SharedState<Id>
 where

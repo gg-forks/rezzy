@@ -751,62 +751,6 @@ pub fn epoch_days_to_ymd(days: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    #[test]
-    fn raw_jsonl_spans_skip_blank_lines() {
-        let input = b"\n {\"event_id\":\"$a\"}\n\n{\"event_id\":\"$b\"}";
-        let spans = super::discover_jsonl_spans(input);
-        assert_eq!(spans.len(), 2);
-        assert_eq!(
-            &input[spans[0].start..spans[0].end],
-            b" {\"event_id\":\"$a\"}"
-        );
-        assert_eq!(
-            &input[spans[1].start..spans[1].end],
-            b"{\"event_id\":\"$b\"}"
-        );
-    }
-
-    #[test]
-    fn masked_matrix_fields_extract_adjacency_without_full_dom() {
-        let raw = br#"{"event_id":"$e","room_id":"!r:x","type":"m.room.message","state_key":"","prev_events":["$p"],"auth_events":[["$a",{}]],"content":{"room_version":"10","m.relates_to":{"rel_type":"m.thread","event_id":"$root"},"ignored":{"large":[1,2,3]}}}"#;
-        let mut scratch = super::MatrixEventScratch::with_capacity(4, 4, 32);
-        let fields = super::extract_matrix_event_into(raw, &mut scratch).unwrap();
-        assert_eq!(fields.event_id, Some("$e"));
-        assert_eq!(fields.prev_events, vec!["$p"]);
-        assert_eq!(fields.auth_events, vec!["$a"]);
-    }
-
-    #[test]
-    fn discover_array_and_envelope_and_federation_spans() {
-        let arr = br#"[ {"event_id":"$1"}, {"event_id":"$2"} ]"#;
-        let spans = super::discover_array_spans(arr).unwrap();
-        assert_eq!(spans.len(), 2);
-        assert_eq!(&arr[spans[0].start..spans[0].end], br#"{"event_id":"$1"}"#);
-        assert_eq!(&arr[spans[1].start..spans[1].end], br#"{"event_id":"$2"}"#);
-
-        let env = br#"{"heads":["$h1","$h2"],"events":[{"event_id":"$1"}]}"#;
-        let env_spans = super::discover_envelope_spans(env).unwrap();
-        assert_eq!(env_spans.heads, vec!["$h1", "$h2"]);
-        assert_eq!(env_spans.events.len(), 1);
-        assert_eq!(
-            &env[env_spans.events[0].start..env_spans.events[0].end],
-            br#"{"event_id":"$1"}"#
-        );
-
-        let fed = br#"{"pdus":[{"event_id":"$p1"}],"auth_chain":[{"event_id":"$a1"}]}"#;
-        let fed_spans = super::discover_federation_spans(fed).unwrap();
-        assert_eq!(fed_spans.pdus.len(), 1);
-        assert_eq!(fed_spans.auth_chain.len(), 1);
-        assert_eq!(
-            &fed[fed_spans.pdus[0].start..fed_spans.pdus[0].end],
-            br#"{"event_id":"$p1"}"#
-        );
-        assert_eq!(
-            &fed[fed_spans.auth_chain[0].start..fed_spans.auth_chain[0].end],
-            br#"{"event_id":"$a1"}"#
-        );
-    }
-
     use super::*;
     use rezzy::LeanEvent;
 

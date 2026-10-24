@@ -857,23 +857,101 @@ where
     Ok(output)
 }
 
+struct RawEmitter<'a, F> {
+    out: &'a mut String,
+    exclude: &'a mut F,
+    strict: bool,
+}
+
+impl<F: FnMut(&str) -> bool> RawEmitter<'_, F> {
+    fn emit_raw(&mut self, raw: &[u8]) -> Result<(), Error> {
+        let mut tokenizer = Tokenizer::new(raw);
+        tokenizer.ws();
+        match tokenizer.input.get(tokenizer.pos).copied() {
+            Some(b'{') => self.emit_object(&mut tokenizer, raw),
+            Some(b'[') => self.emit_array(&mut tokenizer, raw),
+            Some(b'"') => emit_string(&mut tokenizer, raw, self.out),
+            Some(b'n') => emit_literal(&mut tokenizer, raw, self.out, b"null"),
+            Some(b't') => emit_literal(&mut tokenizer, raw, self.out, b"true"),
+            Some(b'f') => emit_literal(&mut tokenizer, raw, self.out, b"false"),
+            Some(b'-' | b'0'..=b'9') => emit_number(&mut tokenizer, raw, self.out, self.strict),
+            Some(_) => Err(Error::InvalidToken),
+            None => Err(Error::UnexpectedEnd),
+        }
+    }
+
+    fn emit_object(&mut self, tokenizer: &mut Tokenizer<'_>, raw: &[u8]) -> Result<(), Error> {
+        let mut members = tokenizer
+            .object_members()
+            .map_err(|_| Error::InvalidToken)?;
+        finish(tokenizer, raw)?;
+        members.sort_by(|a, b| a.key.as_ref().cmp(b.key.as_ref()));
+        self.out.push('{');
+        let mut first = true;
+        for index in 0..members.len() {
+            let member = &members[index];
+            if members
+                .get(index.saturating_add(1))
+                .is_some_and(|next| next.key.as_ref() == member.key.as_ref())
+                || (self.exclude)(member.key.as_ref())
+            {
+                continue;
+            }
+            if !first {
+                self.out.push(',');
+            }
+            first = false;
+            write_string_into(self.out, member.key.as_ref());
+            self.out.push(':');
+            self.emit_raw(member.raw_value)?;
+        }
+        self.out.push('}');
+        Ok(())
+    }
+
+    fn emit_array(&mut self, tokenizer: &mut Tokenizer<'_>, raw: &[u8]) -> Result<(), Error> {
+        tokenizer.pos = tokenizer.pos.checked_add(1).ok_or(Error::InvalidToken)?;
+        tokenizer.ws();
+        self.out.push('[');
+        let mut first = true;
+        while tokenizer.input.get(tokenizer.pos) != Some(&b']') {
+            let start = tokenizer.pos;
+            tokenizer.skip_value().map_err(|_| Error::InvalidToken)?;
+            if !first {
+                self.out.push(',');
+            }
+            first = false;
+            self.emit_raw(&tokenizer.input[start..tokenizer.pos])?;
+            tokenizer.ws();
+            if tokenizer.input.get(tokenizer.pos) == Some(&b',') {
+                tokenizer.pos = tokenizer.pos.checked_add(1).ok_or(Error::InvalidToken)?;
+                tokenizer.ws();
+                if tokenizer.input.get(tokenizer.pos) == Some(&b']') {
+                    return Err(Error::InvalidToken);
+                }
+            } else {
+                break;
+            }
+        }
+        if tokenizer.input.get(tokenizer.pos) != Some(&b']') {
+            return Err(Error::InvalidToken);
+        }
+        self.out.push(']');
+        tokenizer.pos = tokenizer.pos.checked_add(1).ok_or(Error::InvalidToken)?;
+        finish(tokenizer, raw)
+    }
+}
+
 fn emit_raw<F>(raw: &[u8], out: &mut String, exclude: &mut F, strict: bool) -> Result<(), Error>
 where
     F: FnMut(&str) -> bool,
 {
-    let mut tokenizer = Tokenizer::new(raw);
-    tokenizer.ws();
-    match tokenizer.input.get(tokenizer.pos).copied() {
-        Some(b'{') => emit_object(&mut tokenizer, raw, out, exclude, strict),
-        Some(b'[') => emit_array(&mut tokenizer, raw, out, exclude, strict),
-        Some(b'"') => emit_string(&mut tokenizer, raw, out),
-        Some(b'n') => emit_literal(&mut tokenizer, raw, out, b"null"),
-        Some(b't') => emit_literal(&mut tokenizer, raw, out, b"true"),
-        Some(b'f') => emit_literal(&mut tokenizer, raw, out, b"false"),
-        Some(b'-' | b'0'..=b'9') => emit_number(&mut tokenizer, raw, out, strict),
-        Some(_) => Err(Error::InvalidToken),
-        None => Err(Error::UnexpectedEnd),
+    RawEmitter {
+        out,
+        exclude,
+        strict,
     }
+    .emit_raw(raw)
 }
 
 fn finish(tokenizer: &mut Tokenizer<'_>, raw: &[u8]) -> Result<(), Error> {
@@ -881,85 +959,6 @@ fn finish(tokenizer: &mut Tokenizer<'_>, raw: &[u8]) -> Result<(), Error> {
     (tokenizer.pos == raw.len())
         .then_some(())
         .ok_or(Error::TrailingCharacters)
-}
-
-fn emit_object<F>(
-    tokenizer: &mut Tokenizer<'_>,
-    raw: &[u8],
-    out: &mut String,
-    exclude: &mut F,
-    strict: bool,
-) -> Result<(), Error>
-where
-    F: FnMut(&str) -> bool,
-{
-    let mut members = tokenizer
-        .object_members()
-        .map_err(|_| Error::InvalidToken)?;
-    finish(tokenizer, raw)?;
-    members.sort_by(|a, b| a.key.as_ref().cmp(b.key.as_ref()));
-    out.push('{');
-    let mut first = true;
-    for index in 0..members.len() {
-        let member = &members[index];
-        if members
-            .get(index.saturating_add(1))
-            .is_some_and(|next| next.key.as_ref() == member.key.as_ref())
-            || exclude(member.key.as_ref())
-        {
-            continue;
-        }
-        if !first {
-            out.push(',');
-        }
-        first = false;
-        write_string_into(out, member.key.as_ref());
-        out.push(':');
-        emit_raw(member.raw_value, out, exclude, strict)?;
-    }
-    out.push('}');
-    Ok(())
-}
-
-fn emit_array<F>(
-    tokenizer: &mut Tokenizer<'_>,
-    raw: &[u8],
-    out: &mut String,
-    exclude: &mut F,
-    strict: bool,
-) -> Result<(), Error>
-where
-    F: FnMut(&str) -> bool,
-{
-    tokenizer.pos = tokenizer.pos.checked_add(1).ok_or(Error::InvalidToken)?;
-    tokenizer.ws();
-    out.push('[');
-    let mut first = true;
-    while tokenizer.input.get(tokenizer.pos) != Some(&b']') {
-        let start = tokenizer.pos;
-        tokenizer.skip_value().map_err(|_| Error::InvalidToken)?;
-        if !first {
-            out.push(',');
-        }
-        first = false;
-        emit_raw(&tokenizer.input[start..tokenizer.pos], out, exclude, strict)?;
-        tokenizer.ws();
-        if tokenizer.input.get(tokenizer.pos) == Some(&b',') {
-            tokenizer.pos = tokenizer.pos.checked_add(1).ok_or(Error::InvalidToken)?;
-            tokenizer.ws();
-            if tokenizer.input.get(tokenizer.pos) == Some(&b']') {
-                return Err(Error::InvalidToken);
-            }
-        } else {
-            break;
-        }
-    }
-    if tokenizer.input.get(tokenizer.pos) != Some(&b']') {
-        return Err(Error::InvalidToken);
-    }
-    out.push(']');
-    tokenizer.pos = tokenizer.pos.checked_add(1).ok_or(Error::InvalidToken)?;
-    finish(tokenizer, raw)
 }
 
 fn emit_string(tokenizer: &mut Tokenizer<'_>, raw: &[u8], out: &mut String) -> Result<(), Error> {
@@ -1277,20 +1276,8 @@ impl<'a> Tokenizer<'a> {
     /// # Errors
     /// Returns [`TokenizerError`] if the current value is not a valid object.
     pub fn object_members(&mut self) -> Result<Vec<MemberSpan<'a>>, TokenizerError> {
-        self.ws();
-        if self.input.get(self.pos) != Some(&b'{') {
-            return Err(TokenizerError::InvalidToken);
-        }
-        self.advance()?;
-        self.ws();
         let mut members = Vec::new();
-        if self.input.get(self.pos) == Some(&b'}') {
-            self.advance()?;
-            return Ok(members);
-        }
-        loop {
-            self.ws();
-            let key_bytes = self.string_raw()?;
+        self.walk_raw_object_members(|key_bytes, value_type, raw_value| {
             // Borrow the key straight from `input` when it carries no escapes;
             // only an escaped key needs a decoded copy. Running a full
             // `Value` parse per key would allocate for every member.
@@ -1304,40 +1291,13 @@ impl<'a> Tokenizer<'a> {
                     core::str::from_utf8(key_bytes).map_err(|_| TokenizerError::InvalidString)?,
                 )
             };
-            self.ws();
-            if self.input.get(self.pos) != Some(&b':') {
-                return Err(TokenizerError::InvalidToken);
-            }
-            self.advance()?;
-            self.ws();
-            let value_start = self.pos;
-            let value_type = match self.input.get(self.pos).copied() {
-                Some(b'n') => ValueType::Null,
-                Some(b't' | b'f') => ValueType::Bool,
-                Some(b'-' | b'0'..=b'9') => ValueType::Number,
-                Some(b'"') => ValueType::String,
-                Some(b'[') => ValueType::Array,
-                Some(b'{') => ValueType::Object,
-                _ => return Err(TokenizerError::InvalidToken),
-            };
-            self.skip_value()?;
             members.push(MemberSpan {
                 key,
-                raw_value: &self.input[value_start..self.pos],
+                raw_value,
                 value_type,
             });
-            self.ws();
-            match self.input.get(self.pos) {
-                Some(b',') => {
-                    self.advance()?;
-                }
-                Some(b'}') => {
-                    self.advance()?;
-                    break;
-                }
-                _ => return Err(TokenizerError::InvalidToken),
-            }
-        }
+            Ok(())
+        })?;
         Ok(members)
     }
 
@@ -1356,6 +1316,21 @@ impl<'a> Tokenizer<'a> {
     where
         F: FnMut(&str, ValueType, &'a [u8]) -> Result<(), TokenizerError>,
     {
+        self.walk_raw_object_members(|key_bytes, value_type, raw_value| {
+            let key = if key_bytes.contains(&b'\\') {
+                unescape_raw_string(key_bytes, scratch_buf)?;
+                scratch_buf.as_str()
+            } else {
+                core::str::from_utf8(key_bytes).map_err(|_| TokenizerError::InvalidString)?
+            };
+            callback(key, value_type, raw_value)
+        })
+    }
+
+    fn walk_raw_object_members<F>(&mut self, mut visit: F) -> Result<(), TokenizerError>
+    where
+        F: FnMut(&'a [u8], ValueType, &'a [u8]) -> Result<(), TokenizerError>,
+    {
         self.ws();
         if self.input.get(self.pos) != Some(&b'{') {
             return Err(TokenizerError::InvalidToken);
@@ -1369,12 +1344,6 @@ impl<'a> Tokenizer<'a> {
         loop {
             self.ws();
             let key_bytes = self.string_raw()?;
-            let key = if key_bytes.contains(&b'\\') {
-                unescape_raw_string(key_bytes, scratch_buf)?;
-                scratch_buf.as_str()
-            } else {
-                core::str::from_utf8(key_bytes).map_err(|_| TokenizerError::InvalidString)?
-            };
             self.ws();
             if self.input.get(self.pos) != Some(&b':') {
                 return Err(TokenizerError::InvalidToken);
@@ -1392,7 +1361,7 @@ impl<'a> Tokenizer<'a> {
                 _ => return Err(TokenizerError::InvalidToken),
             };
             self.skip_value()?;
-            callback(key, value_type, &self.input[start..self.pos])?;
+            visit(key_bytes, value_type, &self.input[start..self.pos])?;
             self.ws();
             match self.input.get(self.pos) {
                 Some(b',') => {
@@ -1977,36 +1946,50 @@ impl<'a> ValueRef<'a> {
         }
     }
 
-    fn parse_masked_array(
+    fn parse_masked_container<F>(
         tokenizer: &mut Tokenizer<'a>,
-        mask: &FieldMask<'_>,
-        segments: &mut Vec<&'a str>,
-    ) -> Result<Self, TokenizerError> {
+        close: u8,
+        mut step: F,
+    ) -> Result<(), TokenizerError>
+    where
+        F: FnMut(&mut Tokenizer<'a>) -> Result<(), TokenizerError>,
+    {
         if tokenizer.depth >= Tokenizer::MAX_DEPTH {
             return Err(TokenizerError::DepthLimitExceeded);
         }
         tokenizer.depth = tokenizer.depth.saturating_add(1);
         tokenizer.pos = tokenizer.pos.saturating_add(1);
         tokenizer.ws();
-        let mut items = Vec::new();
-        if tokenizer.input.get(tokenizer.pos) == Some(&b']') {
+        if tokenizer.input.get(tokenizer.pos) == Some(&close) {
             tokenizer.pos = tokenizer.pos.saturating_add(1);
             tokenizer.depth = tokenizer.depth.saturating_sub(1);
-            return Ok(Self::Array(items));
+            return Ok(());
         }
         loop {
-            items.push(Self::parse_masked_value(tokenizer, mask, segments)?);
+            step(tokenizer)?;
             tokenizer.ws();
-            match tokenizer.input.get(tokenizer.pos) {
+            match tokenizer.input.get(tokenizer.pos).copied() {
                 Some(b',') => tokenizer.pos = tokenizer.pos.saturating_add(1),
-                Some(b']') => {
+                Some(ch) if ch == close => {
                     tokenizer.pos = tokenizer.pos.saturating_add(1);
                     tokenizer.depth = tokenizer.depth.saturating_sub(1);
-                    break;
+                    return Ok(());
                 }
                 _ => return Err(TokenizerError::InvalidToken),
             }
         }
+    }
+
+    fn parse_masked_array(
+        tokenizer: &mut Tokenizer<'a>,
+        mask: &FieldMask<'_>,
+        segments: &mut Vec<&'a str>,
+    ) -> Result<Self, TokenizerError> {
+        let mut items = Vec::new();
+        Self::parse_masked_container(tokenizer, b']', |tokenizer| {
+            items.push(Self::parse_masked_value(tokenizer, mask, segments)?);
+            Ok(())
+        })?;
         Ok(Self::Array(items))
     }
 
@@ -2015,19 +1998,8 @@ impl<'a> ValueRef<'a> {
         mask: &FieldMask<'_>,
         segments: &mut Vec<&'a str>,
     ) -> Result<Self, TokenizerError> {
-        if tokenizer.depth >= Tokenizer::MAX_DEPTH {
-            return Err(TokenizerError::DepthLimitExceeded);
-        }
-        tokenizer.depth = tokenizer.depth.saturating_add(1);
-        tokenizer.pos = tokenizer.pos.saturating_add(1);
-        tokenizer.ws();
         let mut fields = Vec::new();
-        if tokenizer.input.get(tokenizer.pos) == Some(&b'}') {
-            tokenizer.pos = tokenizer.pos.saturating_add(1);
-            tokenizer.depth = tokenizer.depth.saturating_sub(1);
-            return Ok(Self::Object(fields));
-        }
-        loop {
+        Self::parse_masked_container(tokenizer, b'}', |tokenizer| {
             tokenizer.ws();
             if tokenizer.input.get(tokenizer.pos) != Some(&b'"') {
                 return Err(TokenizerError::InvalidToken);
@@ -2052,18 +2024,8 @@ impl<'a> ValueRef<'a> {
                 tokenizer.skip_value()?;
             }
             let _ = segments.pop();
-
-            tokenizer.ws();
-            match tokenizer.input.get(tokenizer.pos) {
-                Some(b',') => tokenizer.pos = tokenizer.pos.saturating_add(1),
-                Some(b'}') => {
-                    tokenizer.pos = tokenizer.pos.saturating_add(1);
-                    tokenizer.depth = tokenizer.depth.saturating_sub(1);
-                    break;
-                }
-                _ => return Err(TokenizerError::InvalidToken),
-            }
-        }
+            Ok(())
+        })?;
         Ok(Self::Object(fields))
     }
 }
