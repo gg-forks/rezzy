@@ -320,5 +320,34 @@ pub fn run() {
             },
             Some(&provider),
         );
+
+        // A caller-held AuthGraph: built once, outside the timing, as a server
+        // would keep it per room. Only the per-resolution diff is timed.
+        let build_start = Instant::now();
+        let graph = rezzy::auth::roaring::AuthGraph::build(&fixture.events);
+        println!(
+            "auth-graph build (once): {:.3} ms",
+            build_start.elapsed().as_secs_f64() * 1_000.0
+        );
+        time_case(
+            "auth-graph/diff-only",
+            iterations,
+            || graph.state_auth_difference(&fixture.forks).len(),
+            None,
+        );
+        time_case(
+            "lazy/auth-graph-diff",
+            iterations,
+            || {
+                rezzy::resolve_state_maps_lazy_with_diff(
+                    &fixture.forks,
+                    &provider,
+                    Some(graph.state_auth_difference(&fixture.forks)),
+                    StateResVersion::V2,
+                )
+                .len()
+            },
+            Some(&provider),
+        );
     }
 }

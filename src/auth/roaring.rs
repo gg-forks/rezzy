@@ -153,6 +153,84 @@ where
             .collect()
     }
 
+    /// Adds one event, appending it to the topological order.
+    ///
+    /// Its bitmap is the union of its auth events' bitmaps plus their own
+    /// indices, so the graph stays exact as long as each event is inserted after
+    /// its auth events (the order events are accepted in). Auth events not yet
+    /// in the graph are skipped, as in [`Self::build`]. Returns `false` if the
+    /// event was already present.
+    ///
+    /// # Panics
+    /// Panics if the graph already holds as many events as a `u32` index can
+    /// address, as [`Self::build`] does.
+    pub fn insert<C>(&mut self, event: &LeanEvent<Id, C>) -> bool {
+        if self.index.index_of(&event.event_id).is_some() {
+            return false;
+        }
+        let mut bitmap = Bitmap::new();
+        for auth_id in &event.auth_events {
+            if let Some(p_idx) = self.index.index_of(auth_id) {
+                bitmap |= &self.auth_bitmaps[p_idx as usize];
+                bitmap.insert(p_idx);
+            }
+        }
+        self.index
+            .try_push(event.event_id.clone())
+            .expect("auth graph event count fits in a u32 index");
+        self.auth_bitmaps.push(bitmap);
+        true
+    }
+
+    /// The state resolution v2 **auth difference** of `state_maps`:
+    /// `∪ Cᵢ − ∩ Cᵢ`, where `Cᵢ` is the auth chain of every event in state map
+    /// `Sᵢ`, the events included.
+    ///
+    /// Unlike [`Self::auth_difference`], which subtracts the unconflicted
+    /// chain from the conflicted one, this leaves out an ancestor that every
+    /// map's chain reaches even when no unconflicted event cites it. Pass the
+    /// result as the precomputed diff of
+    /// [`resolve_state_maps_lazy_with_diff`](crate::resolve::multi::resolve_state_maps_lazy_with_diff).
+    /// Events not in the graph are skipped.
+    ///
+    /// # Panics
+    /// Panics only if an index in the result is out of this graph's own range,
+    /// which cannot happen: every bit came from [`Self::index`].
+    #[must_use]
+    pub fn state_auth_difference<K: Ord + Clone>(
+        &self,
+        state_maps: &[crate::state::at::SharedState<Id, K>],
+    ) -> Vec<Id> {
+        let mut union = Bitmap::new();
+        let mut intersection: Option<Bitmap> = None;
+        for state in state_maps {
+            let mut chain = Bitmap::new();
+            for id in state.values() {
+                if let Some(idx) = self.index.index_of(id) {
+                    chain |= &self.auth_bitmaps[idx as usize];
+                    chain.insert(idx);
+                }
+            }
+            union |= &chain;
+            match &mut intersection {
+                Some(both) => *both &= &chain,
+                None => intersection = Some(chain),
+            }
+        }
+        let diff = match intersection {
+            Some(both) => core::ops::Sub::sub(union, &both),
+            None => union,
+        };
+        diff.iter()
+            .map(|idx| {
+                self.index
+                    .item_at(idx as usize)
+                    .cloned()
+                    .expect("diff index came from this graph's index")
+            })
+            .collect()
+    }
+
     /// Check whether `ancestor` is in the transitive
     /// auth chain of `descendant`.
     ///

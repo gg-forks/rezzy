@@ -429,3 +429,56 @@ fn test_v2_auth_difference_power_event_authorizes_conflicted_event() {
         );
     }
 }
+
+// ============================================================================
+// AuthGraph: bitmap auth difference
+// ============================================================================
+
+/// Builds the graph event by event, in the topological order `build` uses.
+fn graph_by_insert(events: &HashMap<String, LeanEvent>) -> rezzy::auth::roaring::AuthGraph {
+    let built = rezzy::auth::roaring::AuthGraph::build(events);
+    let mut graph = rezzy::auth::roaring::AuthGraph::build(&HashMap::<String, LeanEvent>::new());
+    for id in built.index.items() {
+        assert!(graph.insert(&events[id]));
+    }
+    assert!(
+        !graph.insert(&events[&built.index.items()[0]]),
+        "re-insert is a no-op"
+    );
+    assert_eq!(graph.auth_bitmaps, built.auth_bitmaps);
+    graph
+}
+
+#[test]
+fn test_auth_graph_state_difference_excludes_shared_ancestor() {
+    let map = shared_ancestor_room();
+    let diff = graph_by_insert(&map).state_auth_difference(&shared_ancestor_forks());
+    assert!(!diff.contains(&"$x".to_string()), "{diff:?}");
+    assert!(!diff.contains(&"$bob_join".to_string()), "{diff:?}");
+}
+
+/// The bitmap diff, passed as the precomputed diff, resolves the same as the
+/// lazy resolver computing the diff itself.
+#[test]
+fn test_auth_graph_state_difference_matches_computed_diff() {
+    for (name, map, forks) in [
+        ("tied chain", room_with_chain(true), fork_states()),
+        ("distinct chain", room_with_chain(false), fork_states()),
+        (
+            "shared ancestor",
+            shared_ancestor_room(),
+            shared_ancestor_forks(),
+        ),
+    ] {
+        let diff = graph_by_insert(&map).state_auth_difference(&forks);
+        let with_graph =
+            resolve_state_maps_lazy_with_diff(&forks, &map, Some(diff), StateResVersion::V2);
+        let computed = resolve_state_maps_lazy_with_diff(
+            &forks,
+            &map,
+            None::<Vec<String>>,
+            StateResVersion::V2,
+        );
+        assert_eq!(with_graph, computed, "{name}");
+    }
+}
