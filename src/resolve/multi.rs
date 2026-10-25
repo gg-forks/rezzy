@@ -773,7 +773,9 @@ where
     };
     for id in &auth_diff {
         if let Some(ev) = provider.get_event(id) {
-            conflicted_events.entry(id.clone()).or_insert_with(|| ev.clone());
+            conflicted_events
+                .entry(id.clone())
+                .or_insert_with(|| ev.clone());
         }
     }
 
