@@ -290,8 +290,8 @@ fn compute_lattice_coordinatized_winners<
 /// - `m.room.create`
 /// - `m.room.power_levels`
 /// - `m.room.join_rules`
-/// - `m.room.member` events that are bans or kicks (V2.1+ only; V2 treats
-///   **all** member events as power events)
+/// - V1: all `m.room.member` events (its separate membership-conflict pass)
+/// - V2 and later: member events that are bans or kicks
 ///
 /// Non-power events are everything else (messages, topics, `m.room.third_party_invite`, etc.).
 pub fn route_power_events<

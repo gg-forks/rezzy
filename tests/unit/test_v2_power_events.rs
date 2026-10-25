@@ -11,6 +11,7 @@ use crate::utils;
 use crate::utils::to_event_map;
 
 use rezzy::basespec::event_types::EventType;
+use rezzy::resolve::multi::resolve_state_maps_lazy_with_diff;
 use rezzy::resolve::semilattice::resolve_semilattice_fold;
 use rezzy::{LeanEvent, PersistentOrdMap, StateResVersion};
 use std::collections::HashMap;
@@ -158,6 +159,13 @@ fn assert_power_event_classification(version: StateResVersion) {
         ),
     ];
     for (name, ev, want) in cases {
+        let want = if version == StateResVersion::V1
+            && ev.event_type == rezzy::basespec::event_types::M_ROOM_MEMBER
+        {
+            true
+        } else {
+            want
+        };
         assert_eq!(ev.is_power_event(version), want, "{name} under {version:?}");
     }
 }
@@ -193,7 +201,7 @@ fn test_v2_profile_chain_distinct_timestamps_resolves_to_last() {
 fn test_v2_profile_chain_tied_timestamps_orders_by_event_id() {
     let map = room_with_chain(true);
     let resolved = rezzy::resolve_state_maps(&fork_states(), &map, StateResVersion::V2);
-    assert_eq!(name_of(&resolved[&bob_key()]), "B");
+    assert_eq!(resolved.get(&bob_key()).map(|id| name_of(id)), Some("B"));
 }
 
 /// The same fork through the lattice fold, given the full conflicted set as
@@ -219,4 +227,158 @@ fn test_v2_and_v2_1_agree_on_tied_profile_chain() {
     let v2 = rezzy::resolve_state_maps(&fork_states(), &map, StateResVersion::V2);
     let v2_1 = rezzy::resolve_state_maps(&fork_states(), &map, StateResVersion::V2_1);
     assert_eq!(name_of(&v2[&bob_key()]), name_of(&v2_1[&bob_key()]));
+}
+
+#[test]
+fn test_v2_lazy_profile_chain_tied_timestamps_orders_by_event_id_without_diff() {
+    let map = room_with_chain(true);
+    let resolved = resolve_state_maps_lazy_with_diff(
+        &fork_states(),
+        &map,
+        None::<Vec<String>>,
+        StateResVersion::V2,
+    );
+    assert_eq!(name_of(&resolved[&bob_key()]), "B");
+}
+
+#[test]
+fn test_v2_lazy_profile_chain_tied_timestamps_orders_by_event_id_with_diff() {
+    let map = room_with_chain(true);
+    let resolved = resolve_state_maps_lazy_with_diff(
+        &fork_states(),
+        &map,
+        Some(
+            [
+                vec!["$bob_join".to_string()],
+                CHAIN.iter().map(|(_, id)| (*id).to_string()).collect(),
+            ]
+            .concat(),
+        ),
+        StateResVersion::V2,
+    );
+    assert_eq!(resolved.get(&bob_key()).map(|id| name_of(id)), Some("B"));
+}
+
+/// Auth-difference events may participate in ordering and auth checks, but
+/// their state keys must not override a value shared by every input fork.
+#[test]
+fn test_v2_auth_difference_event_does_not_overwrite_agreed_key() {
+    let mut events = room_with_chain(true);
+    events.insert(
+        "$agreed_name".into(),
+        utils::parse_jsonl_events(
+            r#"{"event_id":"$agreed_name","type":"m.room.name","state_key":"","sender":"@alice:a.com","origin_server_ts":1500,"content":{"name":"agreed"},"auth_events":["$create"]}"#,
+        )
+        .remove(0),
+    );
+    events.insert(
+        "$diff_name".into(),
+        utils::parse_jsonl_events(
+            r#"{"event_id":"$diff_name","type":"m.room.name","state_key":"","sender":"@alice:a.com","origin_server_ts":1500,"content":{"name":"auth-diff"},"auth_events":["$create"]}"#,
+        )
+        .remove(0),
+    );
+    // Make only A cite the competing name event. It enters the auth
+    // difference, while the room-name slot itself remains agreed.
+    let a = events.get_mut("$m_a").unwrap();
+    a.auth_events.push("$diff_name".into());
+
+    let mut states = fork_states();
+    for state in &mut states {
+        state.insert(
+            (EventType::from("m.room.name"), String::new()),
+            "$agreed_name".into(),
+        );
+    }
+    let resolved = rezzy::resolve_state_maps(&states, &events, StateResVersion::V2);
+    assert_eq!(
+        resolved.get(&(EventType::from("m.room.name"), String::new())),
+        Some(&"$agreed_name".to_string())
+    );
+}
+
+/// V1 resolves `m.room.member` conflicts in a dedicated pass (spec rooms/v1),
+/// so every membership is a power event there, unlike v2 and later.
+#[test]
+fn test_v1_all_memberships_are_power_events() {
+    let auth = ["$create", "$pl", "$jr"];
+    for (name, ev) in [
+        (
+            "own join",
+            member("$j", BOB, BOB, r#"{"membership":"join"}"#, 1, &auth),
+        ),
+        (
+            "own leave",
+            member("$l", BOB, BOB, r#"{"membership":"leave"}"#, 1, &auth),
+        ),
+        (
+            "invite",
+            member("$i", ALICE, BOB, r#"{"membership":"invite"}"#, 1, &auth),
+        ),
+    ] {
+        assert!(ev.is_power_event(StateResVersion::V1), "{name} under V1");
+        assert!(!ev.is_power_event(StateResVersion::V2), "{name} under V2");
+    }
+}
+
+/// An ancestor cited by the conflicted events of *every* fork is in the
+/// intersection of the forks' auth chains, so the spec leaves it out of the
+/// auth difference even when no unconflicted event cites it.
+///
+/// `$x` (and Bob's original join) are cited by both tips but by nothing
+/// unconflicted. `$x` is a later-timestamped event for the same key: if it were
+/// wrongly treated as part of the auth difference it would be applied last and
+/// win. The tips tie on timestamp, so `event_id` decides and `$f2` wins.
+fn shared_ancestor_room() -> HashMap<String, LeanEvent> {
+    let mut events = utils::parse_jsonl_events(ROOM);
+    let auth = ["$create", "$pl", "$jr", "$bob_join"];
+    let mut x = member(
+        "$x",
+        BOB,
+        BOB,
+        r#"{"membership":"join","displayname":"X"}"#,
+        4000,
+        &auth,
+    );
+    x.depth = 5;
+    events.push(x);
+    for id in ["$f1", "$f2"] {
+        let mut tip = member(
+            id,
+            BOB,
+            BOB,
+            r#"{"membership":"join","displayname":"tip"}"#,
+            3000,
+            &["$create", "$pl", "$jr", "$x"],
+        );
+        tip.depth = 6;
+        events.push(tip);
+    }
+    to_event_map(&events)
+}
+
+fn shared_ancestor_forks() -> Vec<PersistentOrdMap<(EventType, String), String>> {
+    let mut states = fork_states();
+    states[0].insert(bob_key(), "$f1".to_string());
+    states[1].insert(bob_key(), "$f2".to_string());
+    states
+}
+
+#[test]
+fn test_v2_shared_auth_ancestor_is_not_in_auth_difference() {
+    let map = shared_ancestor_room();
+    let resolved = rezzy::resolve_state_maps(&shared_ancestor_forks(), &map, StateResVersion::V2);
+    assert_eq!(resolved.get(&bob_key()).map(String::as_str), Some("$f2"));
+}
+
+#[test]
+fn test_v2_lazy_shared_auth_ancestor_is_not_in_auth_difference() {
+    let map = shared_ancestor_room();
+    let resolved = resolve_state_maps_lazy_with_diff(
+        &shared_ancestor_forks(),
+        &map,
+        None::<Vec<String>>,
+        StateResVersion::V2,
+    );
+    assert_eq!(resolved.get(&bob_key()).map(String::as_str), Some("$f2"));
 }

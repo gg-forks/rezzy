@@ -217,49 +217,92 @@ fn auth_difference<Id, K>(
     unconflicted_state: &SharedState<Id, K>,
     state_maps: &[SharedState<Id, K>],
     conflicted_ids: &[Id],
-    auth_events_of: impl Fn(&Id) -> Option<Vec<Id>>,
+    mut event_auth: impl FnMut(&Id) -> Option<(u64, Vec<Id>)>,
 ) -> Vec<Id>
 where
     Id: EventId,
     K: Ord + Clone,
 {
-    let walk = |seeds: &mut Vec<Id>, stop: &FastSet<Id>| {
-        let mut chain = FastSet::default();
-        while let Some(id) = seeds.pop() {
-            if stop.contains(&id) || !chain.insert(id.clone()) {
-                continue;
-            }
-            if let Some(auth) = auth_events_of(&id) {
-                seeds.extend(auth);
+    // Seed each state's chain from its own conflicted state events. Resolving
+    // each input independently is necessary: an auth ancestor shared by every
+    // conflicted chain belongs to the intersection even when it is absent from
+    // the unconflicted state's auth chain.
+    let conflicted: FastSet<&Id> = conflicted_ids.iter().collect();
+    let mut unconflicted_roots = Vec::with_capacity(unconflicted_state.len());
+    for id in unconflicted_state.values() {
+        if let Some((depth, auth_ids)) = event_auth(id) {
+            unconflicted_roots.push((id.clone(), depth, auth_ids));
+        }
+    }
+
+    let mut chains = Vec::with_capacity(state_maps.len());
+    for state in state_maps {
+        let mut u_visited = FastSet::default();
+        let mut u_heap = alloc::collections::BinaryHeap::new();
+        for (id, depth, _) in &unconflicted_roots {
+            if u_visited.insert(id.clone()) {
+                u_heap.push((*depth, id.clone()));
             }
         }
-        chain
-    };
-    let auth_of_all = |ids: &mut dyn Iterator<Item = &Id>| -> Vec<Id> {
-        ids.filter_map(&auth_events_of).flatten().collect()
-    };
 
-    let base = walk(
-        &mut auth_of_all(&mut unconflicted_state.values()),
-        &FastSet::default(),
-    );
-    let conflicted: FastSet<&Id> = conflicted_ids.iter().collect();
-    let chains: Vec<FastSet<Id>> = state_maps
-        .iter()
-        .map(|map| {
-            let mut seeds = auth_of_all(&mut map.values().filter(|id| conflicted.contains(id)));
-            walk(&mut seeds, &base)
-        })
-        .collect();
+        let mut c_visited = FastSet::default();
+        let mut c_heap = alloc::collections::BinaryHeap::new();
+        for id in state.values().filter(|id| conflicted.contains(id)) {
+            if let Some((_, auth_ids)) = event_auth(id) {
+                for auth_id in auth_ids {
+                    if !u_visited.contains(&auth_id) && c_visited.insert(auth_id.clone()) {
+                        if let Some((depth, _)) = event_auth(&auth_id) {
+                            c_heap.push((depth, auth_id));
+                        }
+                    }
+                }
+            }
+        }
 
-    let mut diff: Vec<Id> = chains
-        .iter()
-        .flatten()
-        .filter(|id| !chains.iter().all(|chain| chain.contains(*id)))
-        .cloned()
+        let mut chain = FastSet::default();
+        while let Some(&(c_depth, _)) = c_heap.peek() {
+            while let Some(&(u_depth, _)) = u_heap.peek() {
+                if u_depth < c_depth {
+                    break;
+                }
+                let (_, u_id) = u_heap.pop().expect("peeked unconflicted event");
+                if let Some((_, auth_ids)) = event_auth(&u_id) {
+                    for auth_id in auth_ids {
+                        if u_visited.insert(auth_id.clone()) {
+                            if let Some((depth, _)) = event_auth(&auth_id) {
+                                u_heap.push((depth, auth_id));
+                            }
+                        }
+                    }
+                }
+            }
+
+            let (_, c_id) = c_heap.pop().expect("peeked conflicted event");
+            if !u_visited.contains(&c_id) {
+                chain.insert(c_id.clone());
+                if let Some((_, auth_ids)) = event_auth(&c_id) {
+                    for auth_id in auth_ids {
+                        if !u_visited.contains(&auth_id) && c_visited.insert(auth_id.clone()) {
+                            if let Some((depth, _)) = event_auth(&auth_id) {
+                                c_heap.push((depth, auth_id));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        chains.push(chain);
+    }
+
+    let mut union = FastSet::default();
+    for chain in &chains {
+        union.extend(chain.iter().cloned());
+    }
+    let mut diff: Vec<Id> = union
+        .into_iter()
+        .filter(|id| !chains.iter().all(|chain| chain.contains(id)))
         .collect();
     diff.sort();
-    diff.dedup();
     diff
 }
 
@@ -472,7 +515,9 @@ where
     // are sorted and re-applied like the conflicted state, not only used as
     // auth context.
     let auth_diff = auth_difference(&unconflicted_state, state_maps, &conflicted_ids, |id| {
-        event_context.get(id).map(|ev| ev.auth_events.clone())
+        event_context
+            .get(id)
+            .map(|ev| (ev.depth, ev.auth_events.clone()))
     });
     for id in auth_diff {
         if let Some(ev) = event_context.get(&id) {
@@ -765,45 +810,62 @@ where
     // The auth difference is part of the full conflicted set: its events are
     // sorted and re-applied below, not only used as auth context.
     let precomputed = precomputed_auth_diff.is_some();
+    let mut fetched_events = conflicted_events.clone();
     let auth_diff: Vec<Id> = match precomputed_auth_diff {
         Some(auth_diff) => auth_diff.into_iter().collect(),
         None => auth_difference(&unconflicted_state, state_maps, &conflicted_ids, |id| {
-            provider.get_event(id).map(|ev| ev.auth_events.clone())
+            if let Some(ev) = fetched_events.get(id) {
+                return Some((ev.depth, ev.auth_events.clone()));
+            }
+            let ev = provider.get_event(id)?.clone();
+            let result = (ev.depth, ev.auth_events.clone());
+            fetched_events.insert(id.clone(), ev);
+            Some(result)
         }),
     };
     for id in &auth_diff {
-        if let Some(ev) = provider.get_event(id) {
-            conflicted_events
-                .entry(id.clone())
-                .or_insert_with(|| ev.clone());
+        if let Some(ev) = fetched_events
+            .get(id)
+            .cloned()
+            .or_else(|| provider.get_event(id).cloned())
+        {
+            fetched_events.insert(id.clone(), ev.clone());
+            conflicted_events.entry(id.clone()).or_insert(ev);
         }
     }
 
     if precomputed {
         // Fast path: we already know exactly which events are in the auth diff.
         populate_auth_from_diff(auth_diff, &conflicted_events, provider, &mut auth_context);
-    } else {
-        // Slow path: dynamically discover the auth diff via BFS
-        let mut auth_queue: alloc::collections::VecDeque<Id> = alloc::collections::VecDeque::new();
-        for ev in conflicted_events.values() {
-            for aid in &ev.auth_events {
-                if !conflicted_events.contains_key(aid) {
-                    auth_queue.push_back(aid.clone());
-                }
+    }
+
+    // A precomputed diff identifies additional candidates, but does not
+    // necessarily contain the shared auth events needed to check them. Walk
+    // candidate auth chains in either mode, reusing events fetched above.
+    let mut auth_queue: alloc::collections::VecDeque<Id> = alloc::collections::VecDeque::new();
+    for ev in conflicted_events.values() {
+        for aid in &ev.auth_events {
+            if !conflicted_events.contains_key(aid) {
+                auth_queue.push_back(aid.clone());
             }
         }
-        while let Some(aid) = auth_queue.pop_front() {
-            if auth_context.contains_key(&aid) || conflicted_events.contains_key(&aid) {
-                continue;
-            }
-            if let Some(ev) = provider.get_event(&aid) {
-                auth_context.insert(aid, ev.clone());
-                for parent_id in &ev.auth_events {
-                    if !auth_context.contains_key(parent_id)
-                        && !conflicted_events.contains_key(parent_id)
-                    {
-                        auth_queue.push_back(parent_id.clone());
-                    }
+    }
+    while let Some(aid) = auth_queue.pop_front() {
+        if auth_context.contains_key(&aid) || conflicted_events.contains_key(&aid) {
+            continue;
+        }
+        if let Some(ev) = fetched_events
+            .get(&aid)
+            .cloned()
+            .or_else(|| provider.get_event(&aid).cloned())
+        {
+            fetched_events.insert(aid.clone(), ev.clone());
+            auth_context.insert(aid, ev.clone());
+            for parent_id in &ev.auth_events {
+                if !auth_context.contains_key(parent_id)
+                    && !conflicted_events.contains_key(parent_id)
+                {
+                    auth_queue.push_back(parent_id.clone());
                 }
             }
         }

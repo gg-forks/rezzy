@@ -3743,13 +3743,15 @@ impl<Id, C: EventContent, K: AsRef<str>> LeanEvent<Id, C, K> {
     /// - `m.room.create`
     /// - `m.room.power_levels`
     /// - `m.room.join_rules`
-    /// - `m.room.member` events that are bans or kicks (all versions)
+    /// - For V1, all `m.room.member` events (the V1 membership-conflict pass)
+    /// - For V2 and later, membership bans or kicks
     #[must_use]
-    pub fn is_power_event(&self, _version: crate::basespec::rezzy_types::StateResVersion) -> bool {
+    pub fn is_power_event(&self, version: crate::StateResVersion) -> bool {
         self.event_type == crate::basespec::event_types::M_ROOM_CREATE
             || self.event_type == crate::basespec::event_types::M_ROOM_POWER_LEVELS
             || self.event_type == crate::basespec::event_types::M_ROOM_JOIN_RULES
-            || self.is_ban_or_kick()
+            || (self.event_type == crate::basespec::event_types::M_ROOM_MEMBER
+                && (version == crate::StateResVersion::V1 || self.is_ban_or_kick()))
     }
 
     /// Returns `true` if this is a `m.room.power_levels` event (a potential demotion).
