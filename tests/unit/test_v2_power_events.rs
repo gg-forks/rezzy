@@ -259,42 +259,32 @@ fn test_v2_lazy_profile_chain_tied_timestamps_orders_by_event_id_with_diff() {
     assert_eq!(resolved.get(&bob_key()).map(|id| name_of(id)), Some("B"));
 }
 
-/// Auth-difference events may participate in ordering and auth checks, but
-/// their state keys must not override a value shared by every input fork.
+/// Auth-difference events take part in resolution, so a power-levels event in
+/// the difference is sorted and applied. The key it names is agreed by every
+/// fork, so the resolved state must still carry the agreed event, and the
+/// disputed membership must still resolve as before.
 #[test]
-fn test_v2_auth_difference_event_does_not_overwrite_agreed_key() {
+fn test_v2_auth_difference_power_levels_does_not_overwrite_agreed_key() {
     let mut events = room_with_chain(true);
     events.insert(
-        "$agreed_name".into(),
+        "$pl_diff".into(),
         utils::parse_jsonl_events(
-            r#"{"event_id":"$agreed_name","type":"m.room.name","state_key":"","sender":"@alice:a.com","origin_server_ts":1500,"content":{"name":"agreed"},"auth_events":["$create"]}"#,
+            r#"{"event_id":"$pl_diff","type":"m.room.power_levels","state_key":"","sender":"@alice:a.com","depth":3,"origin_server_ts":1500,"content":{"users":{"@alice:a.com":100,"@bob:b.com":100},"events_default":0,"state_default":0,"ban":50,"kick":50,"invite":0},"prev_events":["$pl"],"auth_events":["$create","$alice_join","$pl"]}"#,
         )
         .remove(0),
     );
-    events.insert(
-        "$diff_name".into(),
-        utils::parse_jsonl_events(
-            r#"{"event_id":"$diff_name","type":"m.room.name","state_key":"","sender":"@alice:a.com","origin_server_ts":1500,"content":{"name":"auth-diff"},"auth_events":["$create"]}"#,
-        )
-        .remove(0),
-    );
-    // Make only A cite the competing name event. It enters the auth
-    // difference, while the room-name slot itself remains agreed.
-    let a = events.get_mut("$m_a").unwrap();
-    a.auth_events.push("$diff_name".into());
+    // Only A cites it, so it is in one fork's chain and not the other's: it is
+    // in the auth difference, while the power-levels slot itself is agreed.
+    events
+        .get_mut("$m_a")
+        .unwrap()
+        .auth_events
+        .push("$pl_diff".into());
 
-    let mut states = fork_states();
-    for state in &mut states {
-        state.insert(
-            (EventType::from("m.room.name"), String::new()),
-            "$agreed_name".into(),
-        );
-    }
-    let resolved = rezzy::resolve_state_maps(&states, &events, StateResVersion::V2);
-    assert_eq!(
-        resolved.get(&(EventType::from("m.room.name"), String::new())),
-        Some(&"$agreed_name".to_string())
-    );
+    let resolved = rezzy::resolve_state_maps(&fork_states(), &events, StateResVersion::V2);
+    let pl_key = (EventType::from("m.room.power_levels"), String::new());
+    assert_eq!(resolved.get(&pl_key), Some(&"$pl".to_string()));
+    assert_eq!(resolved.get(&bob_key()).map(|id| name_of(id)), Some("B"));
 }
 
 /// V1 resolves `m.room.member` conflicts in a dedicated pass (spec rooms/v1),
