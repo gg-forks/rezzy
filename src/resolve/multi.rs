@@ -433,23 +433,6 @@ where
         conflicted_events.insert(id.clone(), ev.clone());
     }
 
-    // State Resolution v2 sorts the auth difference together with the
-    // conflicted state events. These events provide candidates for ordering
-    // and auth, but their own state keys are not necessarily conflicted.
-    if matches!(version, StateResVersion::V2) {
-        let conflicted_state_set: crate::HashSet<Id> = conflicted_ids.iter().cloned().collect();
-        let auth_diff = crate::state::at::compute_auth_chain_diff(
-            &unconflicted_state,
-            &conflicted_state_set,
-            event_context,
-        );
-        for id in auth_diff {
-            if let Some(event) = event_context.get(&id) {
-                conflicted_events.entry(id).or_insert_with(|| event.clone());
-            }
-        }
-    }
-
     // Genuinely conflicted keys: captured *before* the MSC4297 subgraph
     // supplement below adds more events to `conflicted_events` purely as
     // auth-chain context. Threading this narrower set into resolution
@@ -482,22 +465,6 @@ where
                     .expect("subgraph event must be in event_context")
                     .clone()
             });
-        }
-    }
-
-    // Before v2.1 the full conflicted set is the conflicted state plus the
-    // auth difference auth(C) \ auth(U). Events that the conflicted entries
-    // cite and the unconflicted state does not are resolved along with them.
-    if !matches!(version, StateResVersion::V2_1 | StateResVersion::V2_1_1) {
-        let conflicted_set: crate::HashSet<Id> = conflicted_ids.iter().cloned().collect();
-        for id in crate::state::at::compute_auth_chain_diff(
-            &unconflicted_state,
-            &conflicted_set,
-            event_context,
-        ) {
-            if let Some(ev) = event_context.get(&id) {
-                conflicted_events.entry(id).or_insert_with(|| ev.clone());
-            }
         }
     }
 
