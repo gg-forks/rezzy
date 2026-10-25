@@ -372,3 +372,60 @@ fn test_v2_lazy_shared_auth_ancestor_is_not_in_auth_difference() {
     );
     assert_eq!(resolved.get(&bob_key()).map(String::as_str), Some("$f2"));
 }
+
+/// An auth-difference power event is applied to the partially resolved state
+/// like any other power event (spec v2 step 2; Synapse's
+/// `_iterative_auth_checks`), so it changes how later events are authorized,
+/// even though its own key is restored from the unconflicted state at the end.
+///
+/// Only Bob's room name cites `$pl_diff`, which lowers `state_default` to 0, so
+/// `$pl_diff` is in the auth difference. Applied, it authorizes Bob's name,
+/// whose mainline position is then later than Alice's, so Bob's name wins.
+#[test]
+fn test_v2_auth_difference_power_event_authorizes_conflicted_event() {
+    let mut events = utils::parse_jsonl_events(ROOM);
+    events.extend(utils::parse_jsonl_events(
+        r#"
+{"event_id":"$pl_diff","type":"m.room.power_levels","state_key":"","sender":"@alice:a.com","depth":5,"origin_server_ts":1500,"content":{"users":{"@alice:a.com":100},"events_default":0,"state_default":0,"ban":50,"kick":50,"invite":0},"prev_events":["$bob_join"],"auth_events":["$create","$alice_join","$pl"]}
+{"event_id":"$name_alice","type":"m.room.name","state_key":"","sender":"@alice:a.com","depth":5,"origin_server_ts":1600,"content":{"name":"alice"},"prev_events":["$bob_join"],"auth_events":["$create","$alice_join","$pl"]}
+{"event_id":"$name_bob","type":"m.room.name","state_key":"","sender":"@bob:b.com","depth":6,"origin_server_ts":1700,"content":{"name":"bob"},"prev_events":["$pl_diff"],"auth_events":["$create","$bob_join","$pl_diff"]}
+"#,
+    ));
+    let events = to_event_map(&events);
+
+    let mut states = fork_states();
+    for state in &mut states {
+        state.insert(bob_key(), "$bob_join".to_string());
+    }
+    let name_key = (EventType::from("m.room.name"), String::new());
+    states[0].insert(name_key.clone(), "$name_alice".to_string());
+    states[1].insert(name_key.clone(), "$name_bob".to_string());
+
+    let pl_key = (EventType::from("m.room.power_levels"), String::new());
+    for (path, resolved) in [
+        (
+            "concrete",
+            rezzy::resolve_state_maps(&states, &events, StateResVersion::V2),
+        ),
+        (
+            "lazy",
+            resolve_state_maps_lazy_with_diff(
+                &states,
+                &events,
+                None::<Vec<String>>,
+                StateResVersion::V2,
+            ),
+        ),
+    ] {
+        assert_eq!(
+            resolved.get(&name_key).map(String::as_str),
+            Some("$name_bob"),
+            "{path}"
+        );
+        assert_eq!(
+            resolved.get(&pl_key).map(String::as_str),
+            Some("$pl"),
+            "{path}"
+        );
+    }
+}

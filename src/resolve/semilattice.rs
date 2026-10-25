@@ -471,6 +471,18 @@ where
     for (k, ev) in key_winners {
         final_resolved.insert(k, ev.event_id.clone());
     }
+    // V2's power phase may apply auth-difference events to agreed keys (see
+    // `decides_key`); the spec's final step restores the unconflicted state.
+    if inputs.version == crate::StateResVersion::V2 {
+        crate::resolve::iterative::drop_undecided_keys(
+            &mut final_resolved,
+            inputs.unconflicted_state,
+            inputs.conflicted_keys,
+        );
+        for (k, v) in inputs.unconflicted_state {
+            final_resolved.insert(k.clone(), v.clone());
+        }
+    }
 
     final_resolved
 }
