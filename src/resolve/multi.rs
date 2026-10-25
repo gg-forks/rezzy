@@ -797,6 +797,7 @@ where
 
     // The auth difference is part of the full conflicted set: its events are
     // sorted and re-applied below, not only used as auth context.
+    let precomputed = precomputed_auth_diff.is_some();
     let auth_diff: Vec<Id> = match precomputed_auth_diff {
         Some(auth_diff) => auth_diff.into_iter().collect(),
         None => auth_difference(&unconflicted_state, state_maps, &conflicted_ids, |id| {
@@ -809,7 +810,7 @@ where
         }
     }
 
-    if !auth_diff.is_empty() {
+    if precomputed {
         // Fast path: we already know exactly which events are in the auth diff.
         populate_auth_from_diff(auth_diff, &conflicted_events, provider, &mut auth_context);
     } else {
