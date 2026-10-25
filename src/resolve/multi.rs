@@ -210,9 +210,12 @@ where
 /// set for every v2 version, alongside the conflicted state and (v2.1+) the
 /// conflicted subgraph.
 ///
-/// The auth chain of the unconflicted state is in every `Cᵢ`, so it is walked
-/// once and each map's walk from its conflicted events stops there. Events
-/// that `auth_events_of` cannot find are skipped.
+/// The auth chain of the unconflicted state is in every `Cᵢ`, so it never
+/// contributes to the difference: each map's chain is walked from the auth
+/// events of its conflicted state events, deepest first, and the unconflicted
+/// chain is only advanced as far as needed to stop that walk where the two
+/// meet. The pruning assumes auth events have a smaller `depth` than the
+/// events citing them. Events that `event_auth` cannot find are skipped.
 fn auth_difference<Id, K>(
     unconflicted_state: &SharedState<Id, K>,
     state_maps: &[SharedState<Id, K>],
