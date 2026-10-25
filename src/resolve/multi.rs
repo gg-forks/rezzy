@@ -231,23 +231,22 @@ where
     // conflicted chain belongs to the intersection even when it is absent from
     // the unconflicted state's auth chain.
     let conflicted: FastSet<&Id> = conflicted_ids.iter().collect();
-    let mut unconflicted_roots = Vec::with_capacity(unconflicted_state.len());
+
+    // One unconflicted frontier shared by every map's walk. It only ever
+    // learns events that really are in the unconflicted chain, so a frontier
+    // already advanced deeper by an earlier map prunes more but never wrongly.
+    let mut u_visited = FastSet::default();
+    let mut u_heap = alloc::collections::BinaryHeap::new();
     for id in unconflicted_state.values() {
-        if let Some((depth, auth_ids)) = event_auth(id) {
-            unconflicted_roots.push((id.clone(), depth, auth_ids));
+        if u_visited.insert(id.clone()) {
+            if let Some((depth, _)) = event_auth(id) {
+                u_heap.push((depth, id.clone()));
+            }
         }
     }
 
     let mut chains = Vec::with_capacity(state_maps.len());
     for state in state_maps {
-        let mut u_visited = FastSet::default();
-        let mut u_heap = alloc::collections::BinaryHeap::new();
-        for (id, depth, _) in &unconflicted_roots {
-            if u_visited.insert(id.clone()) {
-                u_heap.push((*depth, id.clone()));
-            }
-        }
-
         let mut c_visited = FastSet::default();
         let mut c_heap = alloc::collections::BinaryHeap::new();
         for id in state.values().filter(|id| conflicted.contains(id)) {
