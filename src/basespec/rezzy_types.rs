@@ -3745,7 +3745,7 @@ impl<Id, C: EventContent, K: AsRef<str>> LeanEvent<Id, C, K> {
     /// - `m.room.join_rules`
     /// - `m.room.member` events that are bans or kicks (all versions)
     #[must_use]
-    pub fn is_power_event(&self, __version: crate::basespec::rezzy_types::StateResVersion) -> bool {
+    pub fn is_power_event(&self, _version: crate::basespec::rezzy_types::StateResVersion) -> bool {
         self.event_type == crate::basespec::event_types::M_ROOM_CREATE
             || self.event_type == crate::basespec::event_types::M_ROOM_POWER_LEVELS
             || self.event_type == crate::basespec::event_types::M_ROOM_JOIN_RULES
