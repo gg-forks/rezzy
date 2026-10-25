@@ -216,11 +216,15 @@ where
 /// chain is only advanced as far as needed to stop that walk where the two
 /// meet. The pruning assumes auth events have a smaller `depth` than the
 /// events citing them. Events that `event_auth` cannot find are skipped.
+///
+/// `event_auth(id, with_auth)` returns the event's depth and, only when
+/// `with_auth` is set, its auth events; depth-only calls (most of them, for the
+/// unconflicted seeds) can then skip copying the auth list.
 fn auth_difference<Id, K>(
     unconflicted_state: &SharedState<Id, K>,
     state_maps: &[SharedState<Id, K>],
     conflicted_ids: &[Id],
-    mut event_auth: impl FnMut(&Id) -> Option<(u64, Vec<Id>)>,
+    mut event_auth: impl FnMut(&Id, bool) -> Option<(u64, Vec<Id>)>,
 ) -> Vec<Id>
 where
     Id: EventId,
@@ -239,7 +243,7 @@ where
     let mut u_heap = alloc::collections::BinaryHeap::new();
     for id in unconflicted_state.values() {
         if u_visited.insert(id.clone()) {
-            if let Some((depth, _)) = event_auth(id) {
+            if let Some((depth, _)) = event_auth(id, false) {
                 u_heap.push((depth, id.clone()));
             }
         }
@@ -250,10 +254,10 @@ where
         let mut c_visited = FastSet::default();
         let mut c_heap = alloc::collections::BinaryHeap::new();
         for id in state.values().filter(|id| conflicted.contains(id)) {
-            if let Some((_, auth_ids)) = event_auth(id) {
+            if let Some((_, auth_ids)) = event_auth(id, true) {
                 for auth_id in auth_ids {
                     if !u_visited.contains(&auth_id) && c_visited.insert(auth_id.clone()) {
-                        if let Some((depth, _)) = event_auth(&auth_id) {
+                        if let Some((depth, _)) = event_auth(&auth_id, false) {
                             c_heap.push((depth, auth_id));
                         }
                     }
@@ -268,10 +272,10 @@ where
                     break;
                 }
                 let (_, u_id) = u_heap.pop().expect("peeked unconflicted event");
-                if let Some((_, auth_ids)) = event_auth(&u_id) {
+                if let Some((_, auth_ids)) = event_auth(&u_id, true) {
                     for auth_id in auth_ids {
                         if u_visited.insert(auth_id.clone()) {
-                            if let Some((depth, _)) = event_auth(&auth_id) {
+                            if let Some((depth, _)) = event_auth(&auth_id, false) {
                                 u_heap.push((depth, auth_id));
                             }
                         }
@@ -282,10 +286,10 @@ where
             let (_, c_id) = c_heap.pop().expect("peeked conflicted event");
             if !u_visited.contains(&c_id) {
                 chain.insert(c_id.clone());
-                if let Some((_, auth_ids)) = event_auth(&c_id) {
+                if let Some((_, auth_ids)) = event_auth(&c_id, true) {
                     for auth_id in auth_ids {
                         if !u_visited.contains(&auth_id) && c_visited.insert(auth_id.clone()) {
-                            if let Some((depth, _)) = event_auth(&auth_id) {
+                            if let Some((depth, _)) = event_auth(&auth_id, false) {
                                 c_heap.push((depth, auth_id));
                             }
                         }
@@ -516,11 +520,21 @@ where
     // The auth difference is part of the full conflicted set, so its events
     // are sorted and re-applied like the conflicted state, not only used as
     // auth context.
-    let auth_diff = auth_difference(&unconflicted_state, state_maps, &conflicted_ids, |id| {
-        event_context
-            .get(id)
-            .map(|ev| (ev.depth, ev.auth_events.clone()))
-    });
+    let auth_diff = auth_difference(
+        &unconflicted_state,
+        state_maps,
+        &conflicted_ids,
+        |id, with_auth| {
+            event_context.get(id).map(|ev| {
+                let auth = if with_auth {
+                    ev.auth_events.clone()
+                } else {
+                    Vec::new()
+                };
+                (ev.depth, auth)
+            })
+        },
+    );
     for id in auth_diff {
         if let Some(ev) = event_context.get(&id) {
             conflicted_events.entry(id).or_insert_with(|| ev.clone());
@@ -684,6 +698,45 @@ where
     crate::resolve::subgraph::compute_v2_1_conflicted_subgraph(&auth_only, conflicted_ids)
 }
 
+/// [`auth_difference`] over a lazy provider, reusing events already in
+/// `fetched_events` and looking each other event up at most once.
+fn lazy_auth_difference<Id, C>(
+    unconflicted_state: &SharedState<Id>,
+    state_maps: &[SharedState<Id>],
+    conflicted_ids: &[Id],
+    provider: &impl EventProvider<Id, C>,
+    fetched_events: &HashMap<Id, LeanEvent<Id, C>>,
+) -> Vec<Id>
+where
+    Id: EventId,
+    C: EventContent + Clone,
+{
+    // Depth-only reads keep just the depth and auth list, so seeding from the
+    // unconflicted state copies no event bodies and a later full read of the
+    // same event needs no second provider lookup.
+    let mut seen: crate::FastMap<Id, (u64, Vec<Id>)> = crate::FastMap::default();
+    auth_difference(
+        unconflicted_state,
+        state_maps,
+        conflicted_ids,
+        |id, with_auth| {
+            let pick = |depth: u64, auth: &Vec<Id>| {
+                (depth, if with_auth { auth.clone() } else { Vec::new() })
+            };
+            if let Some(ev) = fetched_events.get(id) {
+                return Some(pick(ev.depth, &ev.auth_events));
+            }
+            if let Some((depth, auth)) = seen.get(id) {
+                return Some(pick(*depth, auth));
+            }
+            let ev = provider.get_event(id)?;
+            let result = pick(ev.depth, &ev.auth_events);
+            seen.insert(id.clone(), (ev.depth, ev.auth_events.clone()));
+            Some(result)
+        },
+    )
+}
+
 /// Populate `auth_context` from a precomputed auth diff, skipping events
 /// already in `conflicted_events`.
 ///
@@ -815,15 +868,13 @@ where
     let mut fetched_events = conflicted_events.clone();
     let auth_diff: Vec<Id> = match precomputed_auth_diff {
         Some(auth_diff) => auth_diff.into_iter().collect(),
-        None => auth_difference(&unconflicted_state, state_maps, &conflicted_ids, |id| {
-            if let Some(ev) = fetched_events.get(id) {
-                return Some((ev.depth, ev.auth_events.clone()));
-            }
-            let ev = provider.get_event(id)?.clone();
-            let result = (ev.depth, ev.auth_events.clone());
-            fetched_events.insert(id.clone(), ev);
-            Some(result)
-        }),
+        None => lazy_auth_difference(
+            &unconflicted_state,
+            state_maps,
+            &conflicted_ids,
+            provider,
+            &fetched_events,
+        ),
     };
     for id in &auth_diff {
         if let Some(ev) = fetched_events
