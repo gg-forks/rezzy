@@ -19,9 +19,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use rezzy::hamt::delta::{diff_hamt_nodes, isolate_delta};
-use rezzy::incremental::LtHash;
 use rezzy::hamt::hash::StructuralHash;
 use rezzy::hamt::{self, HamtNode, NodeRef};
+use rezzy::incremental::LtHash;
 
 use crate::common::prelude::*;
 use crate::common::{make_string_entries, unreachable_resolver};
