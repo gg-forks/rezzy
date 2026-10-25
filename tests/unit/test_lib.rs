@@ -5454,18 +5454,18 @@ fn test_v2_vs_v2_1_member_power_event_classification() {
         "V2 should route message to non-power events"
     );
 
-    // In V2, ALL member events are power events.
+    // In V2, only kicks and bans are member power events.
     assert!(
-        set1_v2_power.contains_key("$self_join"),
-        "V2 should treat self-join as power event"
+        set1_v2_non_power.contains_key("$self_join"),
+        "V2 should route self-join to non-power events"
     );
     assert!(
         set1_v2_power.contains_key("$kick"),
         "V2 should treat kick as power event"
     );
     assert!(
-        set1_v2_power.contains_key("$self_leave"),
-        "V2 should treat self-leave as power event"
+        set1_v2_non_power.contains_key("$self_leave"),
+        "V2 should route self-leave to non-power events"
     );
     assert!(
         set1_v2_non_power.contains_key("$msg"),

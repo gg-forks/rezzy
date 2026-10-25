@@ -204,6 +204,65 @@ where
     .0
 }
 
+/// The auth difference of the state maps, as the v2 spec defines it:
+/// `∪ Cᵢ − ∩ Cᵢ`, where `Cᵢ` is the full auth chain of state map `Sᵢ` (the
+/// union of the auth chains of its events). It is part of the full conflicted
+/// set for every v2 version, alongside the conflicted state and (v2.1+) the
+/// conflicted subgraph.
+///
+/// The auth chain of the unconflicted state is in every `Cᵢ`, so it is walked
+/// once and each map's walk from its conflicted events stops there. Events
+/// that `auth_events_of` cannot find are skipped.
+fn auth_difference<Id, K>(
+    unconflicted_state: &SharedState<Id, K>,
+    state_maps: &[SharedState<Id, K>],
+    conflicted_ids: &[Id],
+    auth_events_of: impl Fn(&Id) -> Option<Vec<Id>>,
+) -> Vec<Id>
+where
+    Id: EventId,
+    K: Ord + Clone,
+{
+    let walk = |seeds: &mut Vec<Id>, stop: &FastSet<Id>| {
+        let mut chain = FastSet::default();
+        while let Some(id) = seeds.pop() {
+            if stop.contains(&id) || !chain.insert(id.clone()) {
+                continue;
+            }
+            if let Some(auth) = auth_events_of(&id) {
+                seeds.extend(auth);
+            }
+        }
+        chain
+    };
+    let auth_of_all = |ids: &mut dyn Iterator<Item = &Id>| -> Vec<Id> {
+        ids.filter_map(&auth_events_of).flatten().collect()
+    };
+
+    let base = walk(
+        &mut auth_of_all(&mut unconflicted_state.values()),
+        &FastSet::default(),
+    );
+    let conflicted: FastSet<&Id> = conflicted_ids.iter().collect();
+    let chains: Vec<FastSet<Id>> = state_maps
+        .iter()
+        .map(|map| {
+            let mut seeds = auth_of_all(&mut map.values().filter(|id| conflicted.contains(id)));
+            walk(&mut seeds, &base)
+        })
+        .collect();
+
+    let mut diff: Vec<Id> = chains
+        .iter()
+        .flatten()
+        .filter(|id| !chains.iter().all(|chain| chain.contains(*id)))
+        .cloned()
+        .collect();
+    diff.sort();
+    diff.dedup();
+    diff
+}
+
 /// Resolves N parent state maps into a single deterministic state map.
 ///
 /// This is the high-level entry point for multi-fork state resolution.
@@ -374,6 +433,23 @@ where
         conflicted_events.insert(id.clone(), ev.clone());
     }
 
+    // State Resolution v2 sorts the auth difference together with the
+    // conflicted state events. These events provide candidates for ordering
+    // and auth, but their own state keys are not necessarily conflicted.
+    if matches!(version, StateResVersion::V2) {
+        let conflicted_state_set: crate::HashSet<Id> = conflicted_ids.iter().cloned().collect();
+        let auth_diff = crate::state::at::compute_auth_chain_diff(
+            &unconflicted_state,
+            &conflicted_state_set,
+            event_context,
+        );
+        for id in auth_diff {
+            if let Some(event) = event_context.get(&id) {
+                conflicted_events.entry(id).or_insert_with(|| event.clone());
+            }
+        }
+    }
+
     // Genuinely conflicted keys: captured *before* the MSC4297 subgraph
     // supplement below adds more events to `conflicted_events` purely as
     // auth-chain context. Threading this narrower set into resolution
@@ -406,6 +482,34 @@ where
                     .expect("subgraph event must be in event_context")
                     .clone()
             });
+        }
+    }
+
+    // Before v2.1 the full conflicted set is the conflicted state plus the
+    // auth difference auth(C) \ auth(U). Events that the conflicted entries
+    // cite and the unconflicted state does not are resolved along with them.
+    if !matches!(version, StateResVersion::V2_1 | StateResVersion::V2_1_1) {
+        let conflicted_set: crate::HashSet<Id> = conflicted_ids.iter().cloned().collect();
+        for id in crate::state::at::compute_auth_chain_diff(
+            &unconflicted_state,
+            &conflicted_set,
+            event_context,
+        ) {
+            if let Some(ev) = event_context.get(&id) {
+                conflicted_events.entry(id).or_insert_with(|| ev.clone());
+            }
+        }
+    }
+
+    // The auth difference is part of the full conflicted set, so its events
+    // are sorted and re-applied like the conflicted state, not only used as
+    // auth context.
+    let auth_diff = auth_difference(&unconflicted_state, state_maps, &conflicted_ids, |id| {
+        event_context.get(id).map(|ev| ev.auth_events.clone())
+    });
+    for id in auth_diff {
+        if let Some(ev) = event_context.get(&id) {
+            conflicted_events.entry(id).or_insert_with(|| ev.clone());
         }
     }
 
@@ -691,7 +795,21 @@ where
     // Lazily BFS auth chains from conflicted events to build minimal auth context
     let mut auth_context: HashMap<Id, LeanEvent<Id, C>> = HashMap::new();
 
-    if let Some(auth_diff) = precomputed_auth_diff {
+    // The auth difference is part of the full conflicted set: its events are
+    // sorted and re-applied below, not only used as auth context.
+    let auth_diff: Vec<Id> = match precomputed_auth_diff {
+        Some(auth_diff) => auth_diff.into_iter().collect(),
+        None => auth_difference(&unconflicted_state, state_maps, &conflicted_ids, |id| {
+            provider.get_event(id).map(|ev| ev.auth_events.clone())
+        }),
+    };
+    for id in &auth_diff {
+        if let Some(ev) = provider.get_event(id) {
+            conflicted_events.entry(id.clone()).or_insert_with(|| ev.clone());
+        }
+    }
+
+    if !auth_diff.is_empty() {
         // Fast path: we already know exactly which events are in the auth diff.
         populate_auth_from_diff(auth_diff, &conflicted_events, provider, &mut auth_context);
     } else {

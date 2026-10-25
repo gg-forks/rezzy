@@ -139,11 +139,11 @@ fn test_route_power_events_classification() {
     let mut non_power = HashMap::new();
     route_power_events(&map, &mut power, &mut non_power, StateResVersion::V2);
 
-    // create, PL, join_rules, and member events are power events
+    // create, PL, join_rules, and kicks/bans are power events
     assert!(power.contains_key("$create"));
     assert!(power.contains_key("$pl"));
     assert!(power.contains_key("$jr"));
-    assert!(power.contains_key("$alice_join"));
+    assert!(non_power.contains_key("$alice_join"));
     // topics are non-power
     assert!(non_power.contains_key("$topic_a"));
     assert!(non_power.contains_key("$topic_b"));
