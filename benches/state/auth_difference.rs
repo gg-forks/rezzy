@@ -31,6 +31,7 @@ pub(crate) struct CountingProvider<'a> {
 }
 
 impl EventProvider<String, JsonValue> for CountingProvider<'_> {
+    /// Looks up an event, counting both successful and missing lookups.
     fn get_event(&self, id: &String) -> Option<&LeanEvent> {
         self.lookups.fetch_add(1, Ordering::Relaxed);
         self.events.get(id)
@@ -38,10 +39,13 @@ impl EventProvider<String, JsonValue> for CountingProvider<'_> {
 }
 
 impl CountingProvider<'_> {
+    /// Clears the lookup count without changing the fixture events.
     fn reset(&self) {
         self.lookups.store(0, Ordering::Relaxed);
     }
 
+    /// Returns attempted lookups since construction or the last reset,
+    /// including missing events.
     fn lookups(&self) -> usize {
         self.lookups.load(Ordering::Relaxed)
     }
@@ -57,6 +61,7 @@ struct EventSpec {
     auth_events: Vec<String>,
 }
 
+/// Builds a state event for the synthetic room, defaulting unspecified fields.
 fn event(id: String, spec: EventSpec) -> LeanEvent {
     LeanEvent {
         event_id: id,
@@ -71,10 +76,15 @@ fn event(id: String, spec: EventSpec) -> LeanEvent {
     }
 }
 
+/// Converts a fixture's event type and state key into an owned map key.
 fn state_key(event_type: &str, state_key: &str) -> (EventType, String) {
     (EventType::from(event_type), state_key.to_string())
 }
 
+/// Builds two topic-conflicting forks with `common_members` additional agreed
+/// members and `auth_chain_len` Bob profile changes per branch. Returns the
+/// event context, both state maps, and the branch profile-event IDs used as
+/// precomputed auth-difference candidates.
 pub(crate) fn build_fixture(common_members: usize, auth_chain_len: usize) -> Fixture {
     let alice = "@alice:example.com";
     let bob = "@bob:example.com";
@@ -262,6 +272,12 @@ pub(crate) fn build_fixture(common_members: usize, auth_chain_len: usize) -> Fix
     }
 }
 
+/// Warms up once, then times `iterations` runs and reports milliseconds and
+/// optional provider lookups per run. `run` returns the result's entry count;
+/// the provider counter is reset after warmup.
+///
+/// # Panics
+/// Panics if `lookups` is present and `iterations` is zero.
 pub(crate) fn time_case(
     label: &str,
     iterations: usize,

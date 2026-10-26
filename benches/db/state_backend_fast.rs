@@ -77,6 +77,9 @@ fn ns(total: Duration, ops: u32) -> f64 {
 
 /// ns/op for [bulk build, cold lookup, warm lookup, insert, fork+diverge,
 /// remove, diff].
+///
+/// # Panics
+/// Panics if `entries` is empty.
 fn measure<B: Backend>(entries: &[(K, V)]) -> [f64; 7] {
     // bulk build
     let reps = (200_000 / entries.len()).clamp(2, 200) as u32;

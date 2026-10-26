@@ -901,6 +901,12 @@ where
 /// loop in [`crate::state::at::run_state_pipeline_streaming`]) can thread
 /// across calls, so `build_mainline`'s BFS-per-call turns into an `O(M)`
 /// cache-hit walk instead of restarting from scratch every time.
+/// Unconflicted values take precedence in the final returned state. The
+/// `conflicted_keys` restriction applies only to V1; later versions allow
+/// supplemental events to update working state during authorization.
+///
+/// # Panics
+/// Panics if `version` is [`StateResVersion::V3`].
 pub(crate) fn resolve_iterative_sort_with_all_caches<
     Id: EventId,
     C: EventContent + Clone,
@@ -1105,15 +1111,14 @@ where
 ///
 /// When `conflicted_keys_override` is `Some`, the caller-supplied set is used
 /// instead of deriving `conflicted_keys` from `conflicted_events` (see
-/// `resolve_iterative_sort_with_cache` for motivation).
+/// `resolve_iterative_sort_with_cache` for motivation). This restricts state
+/// updates only for V1; later versions may apply supplemental events to any
+/// key during authorization. The final state restores unconflicted values;
+/// the deltas describe processing steps and do not include that final merge.
+/// Power events missing from both event maps or lacking a state key are skipped.
 ///
 /// # Panics
-/// Panics (with a descriptive message) if an invariant of the power phase is
-/// violated: a topologically-sorted power event id is missing from both
-/// `conflicted_events` and `auth_context`, or a power event lacks a
-/// `state_key`. Both are structural guarantees — power events are always
-/// drawn from those two maps and are always state events — so these panics
-/// indicate a routing bug rather than a caller-input condition.
+/// Panics if `version` is [`StateResVersion::V3`].
 #[must_use]
 #[allow(
     clippy::type_complexity,

@@ -332,6 +332,8 @@ fn bench_fork_and_diverge(n: usize, entries: &[(Key, Value)]) {
     const REPS: u32 = 50;
     let op_count = REPS * BRANCHES as u32 * EDITS_PER_BRANCH as u32;
 
+    /// Exercises repeated fork-and-edit batches using the same deterministic
+    /// membership edits for each backend on clones of `base`.
     fn fork_cloned<M: Clone>(base: &M, mut insert: impl FnMut(&mut M, Key, Value)) {
         let mut rng = Xorshift128::new(0xABCD);
         for _ in 0..REPS {
@@ -432,6 +434,8 @@ fn bench_diff(n: usize, entries: &[(Key, Value)]) {
     ]);
 }
 
+/// Hashes concatenated event-type, state-key, and event-ID bytes in iterator
+/// order. No sorting or field delimiters are added.
 fn hash_entries<'a>(iter: impl IntoIterator<Item = (&'a Key, &'a Value)>) -> blake3::Hash {
     let mut hash = blake3::Hasher::new();
     for ((event_type, state_key), event_id) in iter {

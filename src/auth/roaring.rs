@@ -97,6 +97,10 @@ where
 {
     /// Build the `AuthGraph` topological structure.
     ///
+    /// Missing auth events are skipped. Events in auth cycles and their
+    /// descendants are omitted. Either case makes [`Self::is_complete`]
+    /// return `false`.
+    ///
     /// # Panics
     ///
     /// Will panic if any internal graph invariants are violated during topological sorting.
@@ -167,9 +171,11 @@ where
         }
     }
 
-    /// Whether every event's bitmap holds its full auth chain: true for a graph
-    /// from [`Self::try_build`] (and any successful [`Self::insert`]s after),
-    /// false if [`Self::build`] skipped something.
+    /// Whether construction skipped no missing auth events or cyclic dependencies.
+    ///
+    /// Successful [`Self::insert`] calls preserve this flag; they do not repair
+    /// an incomplete graph. Direct changes to the public index or bitmaps are
+    /// not checked.
     #[must_use]
     pub const fn is_complete(&self) -> bool {
         self.complete
@@ -179,8 +185,9 @@ where
     ///
     /// `build` skips auth events missing from `sort_context`, so their
     /// descendants' bitmaps silently lack them. This returns every such auth
-    /// event instead, so a caller cannot build a graph whose diffs would be
-    /// incomplete.
+    /// event instead. Auth cycles are still handled as in [`Self::build`]:
+    /// cyclic events and their descendants are omitted, and the returned
+    /// graph's [`Self::is_complete`] is `false`.
     ///
     /// # Errors
     /// Returns [`MissingEvents`] listing auth events cited in `sort_context`
@@ -262,7 +269,8 @@ where
     /// missing auth event is an error and the graph is left unchanged. Insert
     /// in the order events are accepted, or rebuild after backfilling.
     ///
-    /// Returns `Ok(false)` if the event was already present.
+    /// Returns `Ok(true)` for a new event or `Ok(false)` without modifying an
+    /// event already present, even if its supplied auth events differ.
     ///
     /// # Errors
     /// Returns [`MissingEvents`] listing the auth events not yet in the
@@ -270,7 +278,7 @@ where
     ///
     /// # Panics
     /// Panics if the graph already holds as many events as a `u32` index can
-    /// address, as [`Self::build`] does.
+    /// address, or if growing the dense index fails to allocate.
     pub fn insert<C>(&mut self, event: &LeanEvent<Id, C>) -> Result<bool, MissingEvents<Id>> {
         if self.index.index_of(&event.event_id).is_some() {
             return Ok(false);
@@ -308,8 +316,8 @@ where
     /// [`resolve_state_maps_lazy_with_diff`](crate::resolve::multi::resolve_state_maps_lazy_with_diff).
     /// Events not in the graph are skipped; use
     /// [`Self::try_state_auth_difference`] to refuse them instead. Either way the
-    /// result is exact only on a graph from [`Self::try_build`] and successful
-    /// [`Self::insert`]s.
+    /// result requires complete auth-chain bitmaps; check [`Self::is_complete`]
+    /// before using it. Zero or one state map yields an empty difference.
     ///
     /// # Panics
     /// Panics only if an index in the result is out of this graph's own range,
@@ -354,9 +362,8 @@ where
     /// of the difference.
     ///
     /// This checks only the state events themselves. The result is exact only
-    /// if every event's bitmap is complete, that is, the graph came from
-    /// [`Self::try_build`] and successful [`Self::insert`]s. On a graph from the
-    /// lenient [`Self::build`], an ancestor `build` skipped is still missing
+    /// if every event's bitmap is complete; check [`Self::is_complete`] before
+    /// using it. An ancestor skipped during construction is still missing
     /// from the difference.
     ///
     /// # Errors

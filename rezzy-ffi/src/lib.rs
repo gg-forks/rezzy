@@ -41,10 +41,17 @@ fn guard(out: *mut *mut u8, out_len: *mut usize, body: impl FnOnce() -> i32) -> 
 /// Resets the output slots and validates the common `(room_version, input)`
 /// pointer arguments, returning the room-version string and input slice.
 ///
+/// # Errors
+/// Returns `BAD_ARG` without allocating an output buffer if any pointer is
+/// null or the room-version string is not UTF-8. Non-null output slots are
+/// reset even when validation fails.
+///
 /// # Safety
 /// `room_version` must be NUL-terminated and `input` must point to `input_len`
 /// readable bytes, whenever they are non-null. Non-null `out` and `out_len`
-/// must point to writable storage.
+/// must point to writable storage. Input storage must remain valid and
+/// unmodified for the lifetime of the returned borrows and must not overlap
+/// the output slots.
 unsafe fn unpack_raw_args<'a>(
     room_version: *const c_char,
     input: *const u8,
@@ -75,6 +82,11 @@ unsafe fn unpack_raw_args<'a>(
 /// Validates and parses the single-event FFI arguments inside a panic guard,
 /// normalizes the wire event for `room_version`, and hands over any output or
 /// error bytes.
+///
+/// Returns `OK` on success; `op` returning `None` leaves output null with zero
+/// length. Invalid pointers or a non-UTF-8 version return `BAD_ARG` without a
+/// buffer. JSON errors, operation errors, and caught panics return `ERR` with
+/// an allocated message, released with [`rezzy_free`].
 ///
 /// # Safety
 /// Same pointer validity requirements as [`rezzy_event_id`].
@@ -149,8 +161,8 @@ define_wire_event_ffi!(
     ///
     /// Ignores an exported `event_id` for versions without opaque IDs. Returns
     /// 0 on success, 1 with an error message for parsing or hashing failures
-    /// (including opaque-ID and unsupported versions), or 2 without a buffer
-    /// for null arguments or a non-UTF-8 room version. Output bytes are not
+    /// (including opaque-ID and unsupported versions) or a caught panic, or 2
+    /// without a buffer for null arguments or a non-UTF-8 room version. Output bytes are not
     /// NUL-terminated; release any returned buffer with [`rezzy_free`].
     ///
     /// # Safety
@@ -167,8 +179,8 @@ define_wire_event_ffi!(
     /// Checks an event's `hashes.sha256` against its content.
     ///
     /// Returns 0 with null output and zero length on success, 1 with an allocated
-    /// message for parsing or verification errors, or 2 without a buffer for null
-    /// arguments or a non-UTF-8 room version. An exported `event_id` is removed
+    /// message for parsing or verification errors or a caught panic, or 2 without
+    /// a buffer for null arguments or a non-UTF-8 room version. An exported `event_id` is removed
     /// for versions without opaque IDs. Release error buffers with [`rezzy_free`].
     ///
     /// # Safety
