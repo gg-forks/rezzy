@@ -2160,7 +2160,7 @@ mod tests {
         let hamt_ctx = formatting_context(
             None,
             std::time::Duration::ZERO,
-            5,
+            6,
             &hamt_args,
             &events_map,
             &raw_map,
