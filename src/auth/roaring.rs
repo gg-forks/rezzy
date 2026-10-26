@@ -267,7 +267,9 @@ where
     /// result as the precomputed diff of
     /// [`resolve_state_maps_lazy_with_diff`](crate::resolve::multi::resolve_state_maps_lazy_with_diff).
     /// Events not in the graph are skipped; use
-    /// [`Self::try_state_auth_difference`] to refuse them instead.
+    /// [`Self::try_state_auth_difference`] to refuse them instead. Either way the
+    /// result is exact only on a graph from [`Self::try_build`] and successful
+    /// [`Self::insert`]s.
     ///
     /// # Panics
     /// Panics only if an index in the result is out of this graph's own range,
@@ -310,6 +312,12 @@ where
     /// [`Self::state_auth_difference`], but refuses state events missing from
     /// the graph instead of skipping them, which would leave their chains out
     /// of the difference.
+    ///
+    /// This checks only the state events themselves. The result is exact only
+    /// if every event's bitmap is complete, that is, the graph came from
+    /// [`Self::try_build`] and successful [`Self::insert`]s. On a graph from the
+    /// lenient [`Self::build`], an ancestor `build` skipped is still missing
+    /// from the difference.
     ///
     /// # Errors
     /// Returns [`MissingEvents`] listing state event IDs not in the graph.
