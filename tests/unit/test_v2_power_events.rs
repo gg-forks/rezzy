@@ -528,17 +528,12 @@ const ROOM_V12: &str = r#"
 fn test_v2_1_auth_difference_power_event_authorizes_conflicted_event() {
     let scenario = auth_diff_power_event_scenario(ROOM_V12);
     for version in [StateResVersion::V2_1, StateResVersion::V2_1_1] {
-        let expected_name = if version == StateResVersion::V2_1 {
-            "$name_bob"
-        } else {
-            "$name_alice"
-        };
         for (path, resolved) in
             resolve_concrete_and_lazy(&scenario.states, &scenario.events, version)
         {
             assert_eq!(
                 resolved.get(&scenario.name_key).map(String::as_str),
-                Some(expected_name),
+                Some("$name_bob"),
                 "{version:?} {path}"
             );
             assert_eq!(
@@ -550,8 +545,8 @@ fn test_v2_1_auth_difference_power_event_authorizes_conflicted_event() {
     }
 
     // The semilattice entry point delegates V2.1+ to the iterative resolver;
-    // provide the auth-difference event explicitly and verify stock V2.1's
-    // final merge restores the agreed power levels.
+    // provide the auth-difference event explicitly and verify the final merge
+    // restores agreed power levels.
     let mut semilattice_unconflicted = scenario.states[0].clone();
     semilattice_unconflicted.remove(&scenario.name_key);
     let semilattice = resolve_semilattice_fold(

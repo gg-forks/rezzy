@@ -1021,28 +1021,26 @@ where
     }
 
     // Final step (Matrix v2 / MSC4297): apply unconflicted state after the
-    // iterative result for V1/V2/V2.1. Auth-difference events participate in
-    // authorization, but agreed values take precedence in the final output.
-    merge_final_resolved(version, unconflicted_state.clone(), resolved)
+    // iterative result. Auth-difference events participate in authorization,
+    // but agreed values take precedence in the final output.
+    merge_final_resolved(unconflicted_state.clone(), resolved)
 }
 
 /// Whether an accepted event may update `key` in the partially resolved state.
 ///
-/// V2 and stock V2.1 apply auth-difference events during iterative
-/// authorization checks. V2.1.1/V2.2 retain rezzy's additional conflicted-key
-/// restriction. V1 has no auth difference.
+/// Every post-V1 algorithm applies auth-difference events during iterative
+/// authorization checks. The final merge restores unconflicted values.
 pub(crate) fn decides_key<K: Ord + core::hash::Hash>(
     version: StateResVersion,
     conflicted_keys: &crate::FastSet<(EventType, K)>,
     key: &(EventType, K),
 ) -> bool {
-    matches!(version, StateResVersion::V2 | StateResVersion::V2_1) || conflicted_keys.contains(key)
+    version != StateResVersion::V1 || conflicted_keys.contains(key)
 }
 
-/// Merges the iterative result over the unconflicted base. V1/V2/V2.1 restore
-/// unconflicted values; V2.1.1/V2.2 retain rezzy's resolved-wins hardening.
+/// Merges the iterative result over the unconflicted base, then restores
+/// unconflicted values in the final output for every version.
 fn merge_final_resolved<Id, K>(
-    version: StateResVersion,
     unconflicted_state: SharedState<Id, K>,
     resolved: SharedState<Id, K>,
 ) -> SharedState<Id, K>
@@ -1050,19 +1048,11 @@ where
     Id: Clone,
     K: Clone + Ord,
 {
-    if matches!(version, StateResVersion::V2_1_1 | StateResVersion::V2_2) {
-        let mut f = unconflicted_state;
-        for (k, v) in resolved {
-            f.insert(k, v);
-        }
-        f
-    } else {
-        let mut f = resolved;
-        for (k, v) in unconflicted_state {
-            f.insert(k, v);
-        }
-        f
+    let mut f = resolved;
+    for (k, v) in unconflicted_state {
+        f.insert(k, v);
     }
+    f
 }
 
 /// Like [`resolve_iterative_sort`], but also returns per-event
@@ -1298,10 +1288,8 @@ where
         });
     }
 
-    // Same version-gated fix as resolve_iterative_sort_with_all_caches: see
-    // the comment there for why V1/V2 and V2.1+ need opposite merge
-    // directions for this final step.
-    let final_resolved = merge_final_resolved(version, unconflicted_state.clone(), resolved);
+    // Apply the same final unconflicted-state merge as the main resolver.
+    let final_resolved = merge_final_resolved(unconflicted_state.clone(), resolved);
     (final_resolved, deltas)
 }
 

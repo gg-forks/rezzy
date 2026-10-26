@@ -472,16 +472,11 @@ where
     for (k, ev) in key_winners {
         final_resolved.insert(k, ev.event_id.clone());
     }
-    // Stock V2/V2.1 auth-difference events may update agreed keys during
-    // checks (see `decides_key`); their final step restores unconflicted
-    // values. V2.1.1/V2.2 retain rezzy's resolved-wins hardening.
-    if matches!(
-        inputs.version,
-        crate::StateResVersion::V1 | crate::StateResVersion::V2 | crate::StateResVersion::V2_1
-    ) {
-        for (k, v) in inputs.unconflicted_state {
-            final_resolved.insert(k.clone(), v.clone());
-        }
+    // Auth-difference events may update agreed keys during checks (see
+    // `decides_key`); the final step restores unconflicted values for every
+    // version.
+    for (k, v) in inputs.unconflicted_state {
+        final_resolved.insert(k.clone(), v.clone());
     }
 
     final_resolved

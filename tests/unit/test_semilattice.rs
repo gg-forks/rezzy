@@ -196,18 +196,11 @@ fn test_supplemental_key_resolution_by_version(version: StateResVersion) {
     );
 
     let topic_key = topic_key();
-    if matches!(version, StateResVersion::V2 | StateResVersion::V2_1) {
-        assert_eq!(
-            semilattice.get(&topic_key).map(String::as_str),
-            Some("$topic_b"),
-            "an accepted supplemental event decides a key absent from unconflicted_state"
-        );
-    } else {
-        assert!(
-            !semilattice.contains_key(&topic_key),
-            "rezzy hardening keeps supplemental events from deciding excluded keys"
-        );
-    }
+    assert_eq!(
+        semilattice.get(&topic_key).map(String::as_str),
+        Some("$topic_b"),
+        "an accepted supplemental event decides a key absent from unconflicted_state"
+    );
     assert_eq!(
         semilattice, iterative,
         "semilattice and iterative resolution must agree"

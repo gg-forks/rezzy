@@ -266,6 +266,16 @@ fn mtxdb_auth_difference_merged(store: &Store, forks: &[StateMap]) -> Vec<String
         .collect()
 }
 
+fn resolve_with_diff(
+    provider: &MtxdbProvider<'_>,
+    forks: &[StateMap],
+    diff: impl IntoIterator<Item = String>,
+) -> (usize, usize) {
+    let resolved =
+        rezzy::resolve_state_maps_lazy_with_diff(forks, provider, Some(diff), StateResVersion::V2);
+    (resolved.len(), provider.reads.load(Ordering::Relaxed))
+}
+
 fn time(label: &str, iterations: usize, mut run: impl FnMut() -> (usize, usize)) {
     run(); // warm up and verify the path completes
     let start = Instant::now();
@@ -349,13 +359,7 @@ pub fn run() {
         time("lazy/mtxdb-provider mtxdb-closure-diff", iterations, || {
             let provider = MtxdbProvider::new(&store);
             let diff = mtxdb_auth_difference_merged(&store, &fixture.forks);
-            let resolved = rezzy::resolve_state_maps_lazy_with_diff(
-                &fixture.forks,
-                &provider,
-                Some(diff),
-                StateResVersion::V2,
-            );
-            (resolved.len(), provider.reads.load(Ordering::Relaxed))
+            resolve_with_diff(&provider, &fixture.forks, diff)
         });
 
         // An in-memory rezzy AuthGraph kept beside the store (a server would
@@ -370,13 +374,7 @@ pub fn run() {
                 let diff = graph
                     .hybrid_state_auth_difference(&fixture.forks, &provider)
                     .expect("graph is complete");
-                let resolved = rezzy::resolve_state_maps_lazy_with_diff(
-                    &fixture.forks,
-                    &provider,
-                    Some(diff),
-                    StateResVersion::V2,
-                );
-                (resolved.len(), provider.reads.load(Ordering::Relaxed))
+                resolve_with_diff(&provider, &fixture.forks, diff)
             },
         );
     }
