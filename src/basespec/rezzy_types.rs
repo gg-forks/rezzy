@@ -3739,27 +3739,22 @@ impl<Id, C: EventContent, K: AsRef<str>> LeanEvent<Id, C, K> {
     /// room's administrative state and must go through the full power-phase
     /// resolution pipeline.
     ///
-    /// Power events are:
-    /// - `m.room.create`
+    /// Spec power events are:
     /// - `m.room.power_levels`
     /// - `m.room.join_rules`
-    /// - `m.room.member` events that are bans or kicks (V2.1+), or
-    ///   **all** member events (V2 and below)
+    /// - For V1, all `m.room.member` events (the V1 membership-conflict pass)
+    /// - For V2 and later, membership bans or kicks
+    ///
+    /// `m.room.create` is included for rezzy's resolution pipeline; the Matrix
+    /// spec does not classify it as a power event. It cannot be conflicted in
+    /// a well-formed room.
     #[must_use]
-    pub fn is_power_event(&self, version: crate::basespec::rezzy_types::StateResVersion) -> bool {
+    pub fn is_power_event(&self, version: crate::StateResVersion) -> bool {
         self.event_type == crate::basespec::event_types::M_ROOM_CREATE
             || self.event_type == crate::basespec::event_types::M_ROOM_POWER_LEVELS
             || self.event_type == crate::basespec::event_types::M_ROOM_JOIN_RULES
-            || if matches!(
-                version,
-                crate::basespec::rezzy_types::StateResVersion::V2_1
-                    | crate::basespec::rezzy_types::StateResVersion::V2_1_1
-                    | crate::basespec::rezzy_types::StateResVersion::V2_2
-            ) {
-                self.is_ban_or_kick()
-            } else {
-                self.event_type == crate::basespec::event_types::M_ROOM_MEMBER
-            }
+            || (self.event_type == crate::basespec::event_types::M_ROOM_MEMBER
+                && (version == crate::StateResVersion::V1 || self.is_ban_or_kick()))
     }
 
     /// Returns `true` if this is a `m.room.power_levels` event (a potential demotion).

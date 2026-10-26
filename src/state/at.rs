@@ -1559,11 +1559,15 @@ where
         }
     }
 
-    // Supplement conflicted_events with the auth difference auth(C) \ auth(U)
-    let auth_diff = compute_auth_chain_diff(&unconflicted_state, &conflicted_state_set, events_map);
-    for id_val in auth_diff {
-        if let Some(event) = events_map.get(&id_val) {
-            conflicted_events.insert(id_val, event.clone());
+    // Supplement conflicted_events with the auth difference auth(C) \ auth(U).
+    // V1 does not compute or resolve an auth difference.
+    if ctx.version != StateResVersion::V1 {
+        let auth_diff =
+            compute_auth_chain_diff(&unconflicted_state, &conflicted_state_set, events_map);
+        for id_val in auth_diff {
+            if let Some(event) = events_map.get(&id_val) {
+                conflicted_events.insert(id_val, event.clone());
+            }
         }
     }
 

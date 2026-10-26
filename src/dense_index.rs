@@ -256,6 +256,34 @@ impl<T: Eq + Clone + core::hash::Hash, Idx: Copy + TryFrom<usize> + DenseIndexWi
     pub fn items(&self) -> &[T] {
         &self.items
     }
+
+    /// Appends `item` as the next dense index, or returns its existing index.
+    ///
+    /// # Errors
+    /// Returns [`IndexTooLarge`] if `item` is new and `Idx` cannot address
+    /// another slot, or if growing the index fails to allocate.
+    pub fn try_push(&mut self, item: T) -> Result<Idx, IndexTooLarge> {
+        if let Some(idx) = self.index_by_item.get(&item) {
+            return Ok(*idx);
+        }
+        let distinct_count = self.items.len();
+        if allocation_should_fail()
+            || self.items.try_reserve(1).is_err()
+            || self.index_by_item.try_reserve(1).is_err()
+        {
+            return Err(IndexTooLarge {
+                distinct_count,
+                allocation_failed: true,
+            });
+        }
+        let idx = Idx::try_from(distinct_count).map_err(|_| IndexTooLarge {
+            distinct_count,
+            allocation_failed: false,
+        })?;
+        self.index_by_item.insert(item.clone(), idx);
+        self.items.push(item);
+        Ok(idx)
+    }
 }
 
 #[cfg(test)]
