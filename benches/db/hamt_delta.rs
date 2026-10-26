@@ -601,11 +601,29 @@ mod disk {
             samples.sort_by_key(|s| s.0);
             let (med, fetches, delta_len) = samples[SAMPLES / 2];
             warm.sort();
+            let no_disk_fetches = samples.iter().all(|sample| sample.1 == 0);
             if let Some(w) = warm.get(warm.len() / 2) {
                 println!(
                     "  disk, {layers} cached layers (n={n}, d={delta}): warm steady-state (1000 reps) {:.3} us",
                     w.as_secs_f64() * 1e6
                 );
+            }
+            if no_disk_fetches {
+                // With no resolver calls, this case measures only the
+                // in-memory diff. Use the repeated steady-state measurement
+                // as the comparable metric; the single cold invocation is
+                // dominated by timer and CPU-frequency startup overhead.
+                let steady = warm[warm.len() / 2];
+                println!(
+                    "  disk, {layers} cached layers (n={n}, d={delta}): {:.3} ms/op (0 fetches, {delta_len} delta leaves; 1000-repetition median)",
+                    steady.as_secs_f64() * 1e3
+                );
+                println!(
+                    "    one-shot samples ranged {:.3}–{:.3} ms (diagnostic)",
+                    samples[0].0.as_secs_f64() * 1e3,
+                    samples[SAMPLES - 1].0.as_secs_f64() * 1e3
+                );
+                continue;
             }
             println!(
                 "  disk, {layers} cached layers (n={n}, d={delta}): {:.3} ms/op ({fetches} fetches, {:.2} ms/fetch, {delta_len} delta leaves; min {:.3}, max {:.3} ms)",

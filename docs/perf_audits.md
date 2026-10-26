@@ -368,8 +368,7 @@ through the cracks.
   non-integers) — silent auth-semantics deviation.
 - Bench `>>> REZZY SPEEDUP <<<` line still printed (methodology reframed as
   parity oracle but the all-caps number remains).
-- `compare_bench.py` ratchets baseline to the all-time-luckiest run;
-  missing-label and sentinel-regex issues.
+- `compare_bench.py` missing-label and sentinel-regex issues.
 - CLI `render_timeline` defaults `room_version` to `"1"` (fail-open);
   `format.rs` reads `redacts` from `content` (v1–10 top-level) not
   `get_redacts()`.

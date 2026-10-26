@@ -436,6 +436,7 @@ fn bench_diff(n: usize, entries: &[(Key, Value)]) {
 
 /// Hashes concatenated event-type, state-key, and event-ID bytes in iterator
 /// order. No sorting or field delimiters are added.
+#[inline]
 fn hash_entries<'a>(iter: impl IntoIterator<Item = (&'a Key, &'a Value)>) -> blake3::Hash {
     let mut hash = blake3::Hasher::new();
     for ((event_type, state_key), event_id) in iter {
