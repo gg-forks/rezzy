@@ -196,10 +196,18 @@ fn test_supplemental_key_does_not_overwrite_resolved_state(version: StateResVers
     );
 
     let topic_key = topic_key();
-    assert!(
-        !semilattice.contains_key(&topic_key),
-        "an accepted supplemental event must not decide an excluded key"
-    );
+    if version == StateResVersion::V2 {
+        assert_eq!(
+            semilattice.get(&topic_key).map(String::as_str),
+            Some("$topic_b"),
+            "V2: an accepted supplemental event decides its key since it is not in unconflicted_state"
+        );
+    } else {
+        assert!(
+            !semilattice.contains_key(&topic_key),
+            "V2.1+: an accepted supplemental event must not decide an excluded key"
+        );
+    }
     assert_eq!(
         semilattice, iterative,
         "semilattice and iterative resolution must agree"

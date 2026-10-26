@@ -1052,7 +1052,6 @@ where
         version,
         unconflicted_state.clone(),
         resolved,
-        caches.conflicted_keys,
     )
 }
 
@@ -1064,7 +1063,7 @@ where
 /// unconflicted state is restored at the end, so the final value of an agreed
 /// key is unaffected. V1 has no auth difference, and v2.1+ starts from empty
 /// state with no such restore, so both only let genuinely conflicted keys move.
-fn decides_key<K: Ord + core::hash::Hash>(
+pub(crate) fn decides_key<K: Ord + core::hash::Hash>(
     version: StateResVersion,
     conflicted_keys: &crate::FastSet<(EventType, K)>,
     key: &(EventType, K),
@@ -1083,11 +1082,10 @@ fn merge_final_resolved<Id, K>(
     version: StateResVersion,
     unconflicted_state: SharedState<Id, K>,
     resolved: SharedState<Id, K>,
-    conflicted_keys: &crate::FastSet<(EventType, K)>,
 ) -> SharedState<Id, K>
 where
     Id: Clone,
-    K: Clone + Ord + core::hash::Hash,
+    K: Clone + Ord,
 {
     if version.is_v2_1_plus() {
         let mut f = unconflicted_state;
@@ -1097,36 +1095,10 @@ where
         f
     } else {
         let mut f = resolved;
-        if version == StateResVersion::V2 {
-            drop_undecided_keys(&mut f, &unconflicted_state, conflicted_keys);
-        }
         for (k, v) in unconflicted_state {
             f.insert(k, v);
         }
         f
-    }
-}
-
-/// Removes keys that an auth-difference event set during V2 resolution but
-/// that no input state map holds. `decides_key` lets such events update the
-/// partially resolved state so they take part in authorization, as the spec
-/// does; rezzy still keeps them out of the result, so an event that was only
-/// auth context never introduces a key none of the forks had.
-pub(crate) fn drop_undecided_keys<Id, K>(
-    resolved: &mut SharedState<Id, K>,
-    unconflicted_state: &SharedState<Id, K>,
-    conflicted_keys: &crate::FastSet<(EventType, K)>,
-) where
-    Id: Clone,
-    K: Clone + Ord + core::hash::Hash,
-{
-    let undecided: Vec<(EventType, K)> = resolved
-        .keys()
-        .filter(|k| !unconflicted_state.contains_key(*k) && !conflicted_keys.contains(*k))
-        .cloned()
-        .collect();
-    for k in &undecided {
-        resolved.remove(k);
     }
 }
 
@@ -1370,7 +1342,6 @@ where
         version,
         unconflicted_state.clone(),
         resolved,
-        conflicted_keys,
     );
     (final_resolved, deltas)
 }

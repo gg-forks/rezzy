@@ -194,8 +194,9 @@ fn process_lattice_event<'a, Id, C, K, S2: BuildHasher, S3: BuildHasher>(
     );
     // `conflicted_events` may contain supplemental auth-chain/subgraph events
     // whose own state key was not conflicted. They may authenticate this
-    // candidate, but must never replace the unconflicted resolved value.
-    if !ctx.conflicted_keys.contains(&key) {
+    // candidate. In V2, any accepted event may decide its key; in V2.1+, only
+    // genuinely conflicted keys may be decided.
+    if !crate::resolve::iterative::decides_key(ctx.version, ctx.conflicted_keys, &key) {
         return;
     }
     update_winner_if_better(winners, key, ev, ctx.mainline_distances, ctx.mainline_len);
@@ -474,11 +475,6 @@ where
     // V2's power phase may apply auth-difference events to agreed keys (see
     // `decides_key`); the spec's final step restores the unconflicted state.
     if inputs.version == crate::StateResVersion::V2 {
-        crate::resolve::iterative::drop_undecided_keys(
-            &mut final_resolved,
-            inputs.unconflicted_state,
-            inputs.conflicted_keys,
-        );
         for (k, v) in inputs.unconflicted_state {
             final_resolved.insert(k.clone(), v.clone());
         }
