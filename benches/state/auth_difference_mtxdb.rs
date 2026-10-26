@@ -60,6 +60,8 @@ struct Store {
     adjacency: MatrixAdjacency,
     /// Short id to event id; mtxdb's persisted closures are short-id bitmaps.
     labels: HashMap<u32, String>,
+    /// Event id to short id, as a server holding short ids in its state maps has.
+    shorts: HashMap<String, u32>,
 }
 
 impl Drop for Store {
@@ -96,6 +98,7 @@ fn store_fixture(fixture: &Fixture, name: &str) -> Store {
     txn.commit().expect("commit events");
 
     let mut labels = HashMap::with_capacity(order.len());
+    let mut shorts = HashMap::with_capacity(order.len());
     for id in &order {
         let auth: Vec<&str> = fixture.events[id]
             .auth_events
@@ -106,6 +109,7 @@ fn store_fixture(fixture: &Fixture, name: &str) -> Store {
             .record_event(&db, id, &[], &auth, None)
             .expect("record auth edges");
         labels.insert(short, id.clone());
+        shorts.insert(id.clone(), short);
     }
 
     let closure = AuthClosure::from_adjacency(adjacency);
@@ -115,6 +119,7 @@ fn store_fixture(fixture: &Fixture, name: &str) -> Store {
         closure,
         adjacency,
         labels,
+        shorts,
     }
 }
 
@@ -207,6 +212,60 @@ fn mtxdb_auth_difference(store: &Store, forks: &[StateMap]) -> Vec<String> {
         .collect()
 }
 
+/// [`mtxdb_auth_difference`], cheaper: the unconflicted state's closures are
+/// read once rather than once per fork (that part is in every `Cᵢ`, so it only
+/// needs subtracting from the conflicted part), short ids come from memory,
+/// and chains accumulate in place in a rezzy `Bitmap` because `BitmapSet`'s
+/// set operations allocate a new set per merge.
+fn mtxdb_auth_difference_merged(store: &Store, forks: &[StateMap]) -> Vec<String> {
+    let closure_of = |id: &String, into: &mut rezzy::bitmap::Bitmap| {
+        let short = store.shorts[id];
+        into.insert(short);
+        into.extend(
+            store
+                .closure
+                .get_at(&store.db, short)
+                .expect("read closure")
+                .expect("closure is published")
+                .iter(),
+        );
+    };
+    let first = &forks[0];
+    let unconflicted = |key: &(rezzy::basespec::event_types::EventType, String), id: &String| {
+        forks[1..].iter().all(|f| f.get(key) == Some(id))
+    };
+
+    let mut agreed = rezzy::bitmap::Bitmap::new();
+    for (key, id) in first.iter() {
+        if unconflicted(key, id) {
+            closure_of(id, &mut agreed);
+        }
+    }
+    let mut union = rezzy::bitmap::Bitmap::new();
+    let mut intersection: Option<rezzy::bitmap::Bitmap> = None;
+    for state in forks {
+        let mut chain = rezzy::bitmap::Bitmap::new();
+        for (key, id) in state.iter() {
+            if !(first.get(key) == Some(id) && unconflicted(key, id)) {
+                closure_of(id, &mut chain);
+            }
+        }
+        union |= &chain;
+        match &mut intersection {
+            Some(both) => *both &= &chain,
+            None => intersection = Some(chain),
+        }
+    }
+    if let Some(both) = intersection {
+        union -= &both;
+    }
+    union -= &agreed;
+    union
+        .iter()
+        .map(|short| store.labels[&short].clone())
+        .collect()
+}
+
 fn time(label: &str, iterations: usize, mut run: impl FnMut() -> (usize, usize)) {
     run(); // warm up and verify the path completes
     let start = Instant::now();
@@ -257,6 +316,17 @@ pub fn run() {
         time("mtxdb/closure-diff-only", iterations, || {
             (mtxdb_auth_difference(&store, &fixture.forks).len(), 0)
         });
+        let mut plain = mtxdb_auth_difference(&store, &fixture.forks);
+        let mut merged = mtxdb_auth_difference_merged(&store, &fixture.forks);
+        plain.sort();
+        merged.sort();
+        assert_eq!(plain, merged, "both mtxdb diffs agree");
+        time("mtxdb/closure-diff-only merged", iterations, || {
+            (
+                mtxdb_auth_difference_merged(&store, &fixture.forks).len(),
+                0,
+            )
+        });
         time("lazy/mtxdb-provider computed-diff", iterations, || {
             let provider = MtxdbProvider::new(&store);
             let resolved = rezzy::resolve_state_maps_lazy_with_diff(
@@ -269,7 +339,7 @@ pub fn run() {
         });
         time("lazy/mtxdb-provider mtxdb-closure-diff", iterations, || {
             let provider = MtxdbProvider::new(&store);
-            let diff = mtxdb_auth_difference(&store, &fixture.forks);
+            let diff = mtxdb_auth_difference_merged(&store, &fixture.forks);
             let resolved = rezzy::resolve_state_maps_lazy_with_diff(
                 &fixture.forks,
                 &provider,
