@@ -17,15 +17,15 @@ use rezzy::basespec::event_types::EventType;
 use rezzy::basespec::rezzy_types::EventProvider;
 use rezzy::{JsonValue, LeanEvent, PersistentOrdMap, StateResVersion};
 
-type StateMap = PersistentOrdMap<(EventType, String), String>;
+pub(crate) type StateMap = PersistentOrdMap<(EventType, String), String>;
 
-struct Fixture {
-    events: HashMap<String, LeanEvent>,
-    forks: [StateMap; 2],
+pub(crate) struct Fixture {
+    pub(crate) events: HashMap<String, LeanEvent>,
+    pub(crate) forks: [StateMap; 2],
     auth_diff: Vec<String>,
 }
 
-struct CountingProvider<'a> {
+pub(crate) struct CountingProvider<'a> {
     events: &'a HashMap<String, LeanEvent>,
     lookups: AtomicUsize,
 }
@@ -74,7 +74,7 @@ fn state_key(event_type: &str, state_key: &str) -> (EventType, String) {
     (EventType::from(event_type), state_key.to_string())
 }
 
-fn build_fixture(common_members: usize, auth_chain_len: usize) -> Fixture {
+pub(crate) fn build_fixture(common_members: usize, auth_chain_len: usize) -> Fixture {
     let alice = "@alice:example.com";
     let bob = "@bob:example.com";
     let create = "$create".to_string();
@@ -245,7 +245,7 @@ fn build_fixture(common_members: usize, auth_chain_len: usize) -> Fixture {
     }
 }
 
-fn time_case(
+pub(crate) fn time_case(
     label: &str,
     iterations: usize,
     mut run: impl FnMut() -> usize,

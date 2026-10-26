@@ -1,0 +1,304 @@
+//! The `auth_difference` fixture stored in mtxdb.
+//!
+//! Events are written as JSON records to mtxdb's event pool and their `auth`
+//! edges to its adjacency, then `AuthClosure::rebuild` persists their closures.
+//! Resolution reads events back through an mtxdb-backed provider, and the auth
+//! difference comes from the persisted closures, as a server on mtxdb would
+//! compute it. Reads are served from the OS page cache after the first run, so
+//! these are warm-cache numbers.
+//!
+//! Run with `cargo +1.90.0 bench --manifest-path benches/Cargo.toml --bench
+//! rezzy -- auth_difference_mtxdb`.
+
+use std::cell::OnceCell;
+use std::collections::HashMap;
+use std::hint::black_box;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
+
+use mtxdb::auth_closure::AuthClosure;
+use mtxdb::database::Database;
+use mtxdb::matrix_adjacency::MatrixAdjacency;
+use mtxdb::storage::{NodeData, StorageEngine};
+use mtxdb::{BitmapSet, ShardType};
+use rezzy::basespec::rezzy_types::EventProvider;
+use rezzy::{JsonValue, LeanEvent, StateResVersion};
+
+use super::auth_difference::{build_fixture, Fixture, StateMap};
+
+const ROOM: &str = "!bench:example.com";
+const EVENTS_COLLECTION: [u8; 16] = *b"bench-room-evts\0";
+
+fn node_id(event_id: &str) -> [u8; 16] {
+    let digest = blake3::hash(event_id.as_bytes());
+    let mut id = [0; 16];
+    id.copy_from_slice(&digest.as_bytes()[..16]);
+    id
+}
+
+fn pdu_json(ev: &LeanEvent) -> String {
+    rezzy::json!({
+        "event_id": ev.event_id.clone(),
+        "type": ev.event_type.clone(),
+        "state_key": ev.state_key.clone().unwrap_or_default(),
+        "sender": ev.sender.clone(),
+        "depth": ev.depth,
+        "origin_server_ts": ev.origin_server_ts,
+        "content": ev.content.clone(),
+        "auth_events": ev.auth_events.clone(),
+        "prev_events": Vec::<String>::new(),
+    })
+    .to_string()
+}
+
+/// A room stored in a fresh mtxdb database.
+struct Store {
+    root: PathBuf,
+    db: Database,
+    closure: AuthClosure,
+    adjacency: MatrixAdjacency,
+    /// Short id to event id; mtxdb's persisted closures are short-id bitmaps.
+    labels: HashMap<u32, String>,
+}
+
+impl Drop for Store {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+fn store_fixture(fixture: &Fixture, name: &str) -> Store {
+    let root =
+        std::env::temp_dir().join(format!("rezzy-bench-mtxdb-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let db = Database::open(root.clone()).expect("open mtxdb");
+    let adjacency = MatrixAdjacency::new(ShardType::Edges, ROOM);
+
+    // Auth events first, so every event's targets are recorded before it.
+    let order = rezzy::auth::roaring::AuthGraph::try_build(&fixture.events)
+        .expect("fixture is auth-closed")
+        .index
+        .items()
+        .to_vec();
+
+    let txn = db.begin_transaction();
+    for id in &order {
+        let ev = &fixture.events[id];
+        txn.put(
+            ShardType::EventDag,
+            EVENTS_COLLECTION,
+            node_id(id),
+            &NodeData::from_slice(pdu_json(ev).as_bytes()),
+        )
+        .expect("stage event");
+    }
+    txn.commit().expect("commit events");
+
+    let mut labels = HashMap::with_capacity(order.len());
+    for id in &order {
+        let auth: Vec<&str> = fixture.events[id]
+            .auth_events
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let short = adjacency
+            .record_event(&db, id, &[], &auth, None)
+            .expect("record auth edges");
+        labels.insert(short, id.clone());
+    }
+
+    let closure = AuthClosure::from_adjacency(adjacency);
+    Store {
+        root,
+        db,
+        closure,
+        adjacency,
+        labels,
+    }
+}
+
+/// Reads events from mtxdb, parsing each once per provider.
+///
+/// `EventProvider` hands out references, so each event is parsed into a
+/// per-provider `OnceCell`; a fresh provider per run starts cold.
+struct MtxdbProvider<'a> {
+    store: &'a Store,
+    cells: HashMap<&'a str, OnceCell<Option<LeanEvent>>>,
+    reads: AtomicUsize,
+}
+
+impl<'a> MtxdbProvider<'a> {
+    fn new(store: &'a Store) -> Self {
+        Self {
+            store,
+            cells: store
+                .labels
+                .values()
+                .map(|id| (id.as_str(), OnceCell::new()))
+                .collect(),
+            reads: AtomicUsize::new(0),
+        }
+    }
+
+    fn read(&self, id: &str) -> Option<LeanEvent> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        let record = self
+            .store
+            .db
+            .event_dag()
+            .get(&EVENTS_COLLECTION, &node_id(id))
+            .expect("read event")?;
+        let value = JsonValue::parse_bytes(&record.bytes).expect("stored JSON parses");
+        Some(LeanEvent::from_value(&value, Some("10")).expect("stored event parses"))
+    }
+}
+
+impl EventProvider<String, JsonValue> for MtxdbProvider<'_> {
+    fn get_event(&self, id: &String) -> Option<&LeanEvent> {
+        self.cells
+            .get(id.as_str())?
+            .get_or_init(|| self.read(id))
+            .as_ref()
+    }
+}
+
+/// `∪ Cᵢ − ∩ Cᵢ` from mtxdb's persisted closures, each state event included.
+fn mtxdb_auth_difference(store: &Store, forks: &[StateMap]) -> Vec<String> {
+    let mut union: Option<BitmapSet> = None;
+    let mut intersection: Option<BitmapSet> = None;
+    for state in forks {
+        let mut chain: Option<BitmapSet> = None;
+        for id in state.values() {
+            let short = store
+                .adjacency
+                .short_id(&store.db, id)
+                .expect("read short id")
+                .expect("state event is recorded");
+            let mut closure = store
+                .closure
+                .get_at(&store.db, short)
+                .expect("read closure")
+                .expect("closure is published");
+            closure.insert(short);
+            chain = Some(match chain {
+                Some(c) => c.union(&closure).expect("same room domain"),
+                None => closure,
+            });
+        }
+        let chain = chain.expect("state map is not empty");
+        union = Some(match union {
+            Some(u) => u.union(&chain).expect("same room domain"),
+            None => chain.clone(),
+        });
+        intersection = Some(match intersection {
+            Some(i) => i.intersection(&chain).expect("same room domain"),
+            None => chain,
+        });
+    }
+    let (Some(union), Some(intersection)) = (union, intersection) else {
+        return Vec::new();
+    };
+    union
+        .difference(&intersection)
+        .expect("same room domain")
+        .iter()
+        .map(|short| store.labels[&short].clone())
+        .collect()
+}
+
+fn time(label: &str, iterations: usize, mut run: impl FnMut() -> (usize, usize)) {
+    run(); // warm up and verify the path completes
+    let start = Instant::now();
+    let mut result = (0, 0);
+    for _ in 0..iterations {
+        result = black_box(run());
+    }
+    let ms = start.elapsed().as_secs_f64() * 1_000.0 / iterations as f64;
+    println!(
+        "{label}: {ms:.3} ms/op, mtxdb reads/op={}, result entries={}",
+        result.1, result.0
+    );
+}
+
+fn dir_size(path: &std::path::Path) -> u64 {
+    std::fs::read_dir(path).map_or(0, |entries| {
+        entries
+            .filter_map(Result::ok)
+            .map(|e| match e.file_type() {
+                Ok(t) if t.is_dir() => dir_size(&e.path()),
+                _ => e.metadata().map_or(0, |m| m.len()),
+            })
+            .sum()
+    })
+}
+
+/// Runs the `auth_difference` fixture against an mtxdb store.
+pub fn run() {
+    for (members, chain_len, iterations) in [(1_000, 32, 5), (10_000, 64, 3)] {
+        println!(
+            "\n--- auth_difference_mtxdb: {members} common members, {chain_len} events per branch ---"
+        );
+        let fixture = build_fixture(members, chain_len);
+
+        let start = Instant::now();
+        let store = store_fixture(&fixture, &members.to_string());
+        let write_ms = start.elapsed().as_secs_f64() * 1_000.0;
+        let start = Instant::now();
+        let report = store.closure.rebuild(&store.db).expect("rebuild closures");
+        let rebuild_ms = start.elapsed().as_secs_f64() * 1_000.0;
+        assert!(report.is_complete(), "fixture closures are complete");
+        println!(
+            "mtxdb write events + auth edges: {write_ms:.1} ms; closure rebuild: {rebuild_ms:.1} ms; \
+             on disk: {:.1} KiB",
+            dir_size(&store.root) as f64 / 1024.0
+        );
+
+        time("mtxdb/closure-diff-only", iterations, || {
+            (mtxdb_auth_difference(&store, &fixture.forks).len(), 0)
+        });
+        time("lazy/mtxdb-provider computed-diff", iterations, || {
+            let provider = MtxdbProvider::new(&store);
+            let resolved = rezzy::resolve_state_maps_lazy_with_diff(
+                &fixture.forks,
+                &provider,
+                None::<Vec<String>>,
+                StateResVersion::V2,
+            );
+            (resolved.len(), provider.reads.load(Ordering::Relaxed))
+        });
+        time("lazy/mtxdb-provider mtxdb-closure-diff", iterations, || {
+            let provider = MtxdbProvider::new(&store);
+            let diff = mtxdb_auth_difference(&store, &fixture.forks);
+            let resolved = rezzy::resolve_state_maps_lazy_with_diff(
+                &fixture.forks,
+                &provider,
+                Some(diff),
+                StateResVersion::V2,
+            );
+            (resolved.len(), provider.reads.load(Ordering::Relaxed))
+        });
+
+        // An in-memory rezzy AuthGraph kept beside the store (a server would
+        // insert each event as it accepts it), with mtxdb serving the events.
+        let graph = rezzy::auth::roaring::AuthGraph::try_build(&fixture.events)
+            .expect("fixture is auth-closed");
+        time(
+            "lazy/mtxdb-provider rezzy-auth-graph-diff",
+            iterations,
+            || {
+                let provider = MtxdbProvider::new(&store);
+                let diff = graph
+                    .hybrid_state_auth_difference(&fixture.forks, &provider)
+                    .expect("graph is complete");
+                let resolved = rezzy::resolve_state_maps_lazy_with_diff(
+                    &fixture.forks,
+                    &provider,
+                    Some(diff),
+                    StateResVersion::V2,
+                );
+                (resolved.len(), provider.reads.load(Ordering::Relaxed))
+            },
+        );
+    }
+}
