@@ -738,9 +738,12 @@ fn test_resolve_merge_fast_path_identical_parents() {
 /// state key with different values, so full resolution must run.
 #[test]
 fn test_resolve_merged_parent_states_update_arm() {
+    // The creator joins before either topic; no version treats a creator
+    // without a membership event as joined.
     let events_map = dag_a_lines(&[
-        r#"{"event_id":"B","type":"m.room.topic","state_key":"","sender":"@x:x","depth":2,"content":{"topic":"b"},"prev_events":["A"],"auth_events":["A"]}"#,
-        r#"{"event_id":"C","type":"m.room.topic","state_key":"","sender":"@x:x","depth":2,"content":{"topic":"c"},"prev_events":["A"],"auth_events":["A"]}"#,
+        r#"{"event_id":"J","type":"m.room.member","state_key":"@x:x","sender":"@x:x","depth":2,"content":{"membership":"join"},"prev_events":["A"],"auth_events":["A"]}"#,
+        r#"{"event_id":"B","type":"m.room.topic","state_key":"","sender":"@x:x","depth":3,"content":{"topic":"b"},"prev_events":["J"],"auth_events":["A","J"]}"#,
+        r#"{"event_id":"C","type":"m.room.topic","state_key":"","sender":"@x:x","depth":3,"content":{"topic":"c"},"prev_events":["J"],"auth_events":["A","J"]}"#,
         MSG_D_BC_AUTH_A,
     ]);
 
