@@ -214,9 +214,11 @@ where
 /// events of its conflicted state events, deepest first, and the unconflicted
 /// chain is only advanced as far as needed to stop that walk where the two
 /// meet. The pruning assumes auth events have a smaller `depth` than the
-/// events citing them. `event_auth` must therefore cover every state event
-/// and every event in their auth closure; an event it cannot find is skipped,
-/// which can leave a shared ancestor in the difference.
+/// events citing them. `event_auth` must therefore cover every unconflicted
+/// state event and every event in their auth closure; if it cannot find one,
+/// the walk returns that ID as an error instead of silently producing an
+/// incomplete difference. Missing events on the conflicted side are skipped,
+/// so partial contexts still drop candidates they cannot resolve.
 ///
 /// `event_auth(id, with_auth)` returns the event's depth and, only when
 /// `with_auth` is set, its auth events; depth-only calls (most of them, for the
@@ -226,7 +228,7 @@ pub(crate) fn auth_difference<Id, K>(
     state_maps: &[SharedState<Id, K>],
     conflicted_ids: &[Id],
     mut event_auth: impl FnMut(&Id, bool) -> Option<(u64, Vec<Id>)>,
-) -> Vec<Id>
+) -> Result<Vec<Id>, Id>
 where
     Id: EventId,
     K: Ord + Clone,
@@ -244,9 +246,8 @@ where
     let mut u_heap = alloc::collections::BinaryHeap::new();
     for id in unconflicted_state.values() {
         if u_visited.insert(id.clone()) {
-            if let Some((depth, _)) = event_auth(id, false) {
-                u_heap.push((depth, id.clone()));
-            }
+            let (depth, _) = event_auth(id, false).ok_or_else(|| id.clone())?;
+            u_heap.push((depth, id.clone()));
         }
     }
 
@@ -273,13 +274,12 @@ where
                     break;
                 }
                 let (_, u_id) = u_heap.pop().expect("peeked unconflicted event");
-                if let Some((_, auth_ids)) = event_auth(&u_id, true) {
-                    for auth_id in auth_ids {
-                        if u_visited.insert(auth_id.clone()) {
-                            if let Some((depth, _)) = event_auth(&auth_id, false) {
-                                u_heap.push((depth, auth_id));
-                            }
-                        }
+                let (_, auth_ids) = event_auth(&u_id, true).ok_or_else(|| u_id.clone())?;
+                for auth_id in auth_ids {
+                    if u_visited.insert(auth_id.clone()) {
+                        let (depth, _) =
+                            event_auth(&auth_id, false).ok_or_else(|| auth_id.clone())?;
+                        u_heap.push((depth, auth_id));
                     }
                 }
             }
@@ -310,11 +310,12 @@ where
         .filter(|id| !chains.iter().all(|chain| chain.contains(id)))
         .collect();
     diff.sort();
-    diff
+    Ok(diff)
 }
 
 /// Marks unseen auth IDs visited and queues those with known depths, excluding
-/// IDs already reached from unconflicted state. Missing events are skipped.
+/// IDs already reached from unconflicted state. Missing conflicted/auth events
+/// are skipped so partial event contexts still drop them.
 fn enqueue_conflicted_auth_events<Id, F>(
     auth_ids: Vec<Id>,
     unconflicted_visited: &FastSet<Id>,
@@ -366,8 +367,9 @@ fn enqueue_conflicted_auth_events<Id, F>(
 ///
 /// # Panics
 ///
-/// Panics if `state_maps` is empty, or if a conflicted event ID from
-/// the state maps is not found in `event_context`.
+/// Panics if `state_maps` is empty, if a conflicted event ID from the state
+/// maps is not found in `event_context`, or if an unconflicted state event or
+/// auth-chain event needed for the auth difference is missing.
 ///
 /// [`resolve_iterative_sort`]: crate::resolve::iterative::resolve_iterative_sort
 #[must_use]
@@ -459,8 +461,9 @@ where
 /// unconflicted values take precedence in the final result.
 ///
 /// # Panics
-/// Panics for empty input, missing conflicted events, or an unsupported V3
-/// resolution request that reaches the iterative resolver.
+/// Panics for empty input, a missing conflicted event, a missing unconflicted
+/// state or auth-chain event needed for the auth difference, or an unsupported
+/// V3 resolution request that reaches the iterative resolver.
 fn resolve_state_maps_generic<Id, C, S, K>(
     state_maps: &[SharedState<Id, K>],
     event_context: &HashMap<Id, LeanEvent<Id, C, K>, S>,
@@ -566,7 +569,8 @@ where
                     (ev.depth, auth)
                 })
             },
-        );
+        )
+        .unwrap_or_else(|id| panic!("event_context missing unconflicted state or auth event {id}"));
         for id in auth_diff {
             if let Some(ev) = event_context.get(&id) {
                 conflicted_events.entry(id).or_insert_with(|| ev.clone());
@@ -619,8 +623,9 @@ where
 ///
 /// # Panics
 ///
-/// Panics if `base_state_index` is outside `state_maps` or if a conflicted
-/// event is missing from `event_context`.
+/// Panics if `base_state_index` is outside `state_maps`, if a conflicted event
+/// is missing from `event_context`, or if an unconflicted state or auth-chain
+/// event needed for the auth difference is missing.
 ///
 #[must_use]
 pub fn resolve_state_maps_diff<Id, C, S, K>(
@@ -733,14 +738,15 @@ where
 
 /// [`auth_difference`] over a lazy provider, reusing events already in
 /// `fetched_events` and caching each event found through the provider.
-/// Missing events are skipped and may be looked up more than once.
+/// Returns the first unconflicted state or auth-chain event the provider
+/// cannot supply.
 fn lazy_auth_difference<Id, C>(
     unconflicted_state: &SharedState<Id>,
     state_maps: &[SharedState<Id>],
     conflicted_ids: &[Id],
     provider: &impl EventProvider<Id, C>,
     fetched_events: &mut HashMap<Id, LeanEvent<Id, C>>,
-) -> Vec<Id>
+) -> Result<Vec<Id>, Id>
 where
     Id: EventId,
     C: EventContent + Clone,
@@ -836,10 +842,12 @@ fn insert_subgraph_events<Id: EventId, C: Clone>(
 /// `precomputed_auth_diff` supplies candidate IDs as-is, including when it is
 /// `Some(empty)`. `None` computes the difference using event depths, assuming
 /// auth events are shallower than the events citing them. V1 ignores this
-/// argument. Missing auth ancestors or supplied diff events are skipped;
-/// callers must provide complete event data for correct resolution.
-/// Unconflicted values take precedence in the final result. Identical input
-/// maps are returned directly without fetching events.
+/// argument. Computing the difference requires the unconflicted state events
+/// and their auth closure; a missing one panics rather than returning an
+/// incomplete difference. Supplied diff events that the provider cannot find
+/// are skipped, and callers must provide the remaining event data needed for
+/// correct resolution. Unconflicted values take precedence in the final
+/// result. Identical input maps are returned directly without fetching events.
 ///
 /// # Performance
 ///
@@ -849,9 +857,10 @@ fn insert_subgraph_events<Id: EventId, C: Clone>(
 ///
 /// # Panics
 ///
-/// Panics if `state_maps` is empty, or if a conflicted event ID from
-/// the state maps is not found via the provider. Also panics for V3 when
-/// distinct input maps require iterative resolution.
+/// Panics if `state_maps` is empty, if a conflicted event ID from the state
+/// maps is not found via the provider, or if an unconflicted state or
+/// auth-chain event needed to compute the auth difference is missing. Also
+/// panics for V3 when distinct input maps require iterative resolution.
 ///
 /// [`EventProvider`]: crate::basespec::rezzy_types::EventProvider
 #[must_use]
@@ -915,7 +924,8 @@ where
                 &conflicted_ids,
                 provider,
                 &mut fetched_events,
-            ),
+            )
+            .unwrap_or_else(|id| panic!("provider missing unconflicted state or auth event {id}")),
         }
     };
     for id in &auth_diff {
@@ -1375,6 +1385,27 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "event_context missing unconflicted state or auth event $create")]
+    fn test_resolve_missing_unconflicted_event_panics() {
+        let fork_a = fork(&[
+            ("m.room.create", "", "$create"),
+            ("m.room.member", "@alice:x", "$join_a"),
+        ]);
+        let fork_b = fork(&[
+            ("m.room.create", "", "$create"),
+            ("m.room.member", "@bob:x", "$join_b"),
+        ]);
+
+        let mut events: HashMap<alloc::string::String, LeanEvent> = HashMap::new();
+        events.insert("$join_a".into(), join_ev("$join_a", "@alice:x"));
+        events.insert("$join_b".into(), join_ev("$join_b", "@bob:x"));
+
+        // The auth difference seeds from the unconflicted create event, which
+        // this partial context omits. Do not silently treat it as a leaf.
+        let _ = resolve_state_maps(&[fork_a, fork_b], &events, StateResVersion::V2);
+    }
+
+    #[test]
     fn test_resolve_single_map() {
         let map = fork(&[
             ("m.room.create", "", "$create"),
@@ -1600,6 +1631,33 @@ mod tests {
         let events = parse_jsonl_map(
             r#"
 {"event_id": "$create", "type": "m.room.create", "state_key": "", "sender": "@alice:x", "content": {}}
+"#,
+        );
+
+        let _ = resolve_state_maps_lazy_with_diff(
+            &[fork_a, fork_b],
+            &events,
+            None::<alloc::vec::Vec<alloc::string::String>>,
+            StateResVersion::V2,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "provider missing unconflicted state or auth event $create")]
+    fn test_resolve_lazy_missing_unconflicted_event_panics() {
+        let fork_a = fork(&[
+            ("m.room.create", "", "$create"),
+            ("m.room.member", "@alice:x", "$join_a"),
+        ]);
+        let fork_b = fork(&[
+            ("m.room.create", "", "$create"),
+            ("m.room.member", "@bob:x", "$join_b"),
+        ]);
+
+        let events = parse_jsonl_map(
+            r#"
+{"event_id": "$join_a", "type": "m.room.member", "state_key": "@alice:x", "sender": "@alice:x", "auth_events": ["$create"], "depth": 1, "content": {"membership": "join"}}
+{"event_id": "$join_b", "type": "m.room.member", "state_key": "@bob:x", "sender": "@bob:x", "auth_events": ["$create"], "depth": 1, "content": {"membership": "join"}}
 "#,
         );
 

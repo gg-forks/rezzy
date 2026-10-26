@@ -1505,10 +1505,14 @@ impl<'a, Id, C, S, K> MergeContext<'a, Id, C, S, K> {
 /// Multiple distinct parents go through the full state-resolution path, which
 /// groups the unconflicted state and runs the iterative sort on the conflicted
 /// subset (including the state-map auth difference `∪ Cᵢ − ∩ Cᵢ` for versions
-/// after V1). Events absent from the event map are skipped.
+/// after V1). Events absent from the event map are skipped unless they are an
+/// unconflicted state or auth-chain event needed by the auth-difference walk,
+/// in which case resolution panics.
 ///
 /// # Panics
-/// Panics for V3 when distinct parent states require iterative resolution.
+/// Panics if an unconflicted state or auth-chain event needed for the auth
+/// difference is missing, or for V3 when distinct parent states require
+/// iterative resolution.
 pub(crate) fn resolve_merged_parent_states<Id, C, S, K>(
     prev_states: &[SharedState<Id, K>],
     ctx: &mut MergeContext<'_, Id, C, S, K>,
@@ -1582,7 +1586,8 @@ where
                     )
                 })
             },
-        );
+        )
+        .unwrap_or_else(|id| panic!("events_map missing unconflicted state or auth event {id}"));
         for id_val in auth_diff {
             if let Some(event) = events_map.get(&id_val) {
                 conflicted_events.insert(id_val, event.clone());
