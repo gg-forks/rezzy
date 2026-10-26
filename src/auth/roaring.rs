@@ -408,12 +408,15 @@ where
         let mut union = Bitmap::new();
         let mut intersection: Option<Bitmap> = None;
         let mut walked_chains: Vec<crate::FastSet<Id>> = Vec::with_capacity(state_maps.len());
+        // Each map walks separately, so cache auth lists across maps: a shared
+        // unindexed ancestor is fetched once per call, not once per map.
+        let mut auth_of: crate::FastMap<Id, Option<Vec<Id>>> = crate::FastMap::default();
         for state in state_maps {
             let mut chain = Bitmap::new();
             let mut walked = crate::FastSet::default();
-            let mut stack: Vec<&Id> = state.values().collect();
+            let mut stack: Vec<Id> = state.values().cloned().collect();
             while let Some(id) = stack.pop() {
-                if let Some(idx) = self.index.index_of(id) {
+                if let Some(idx) = self.index.index_of(&id) {
                     chain |= &self.auth_bitmaps[idx as usize];
                     chain.insert(idx);
                     continue;
@@ -421,9 +424,12 @@ where
                 if !walked.insert(id.clone()) {
                     continue;
                 }
-                match provider.get_event(id) {
-                    Some(ev) => stack.extend(&ev.auth_events),
-                    None => missing.push(id.clone()),
+                let auth = auth_of
+                    .entry(id.clone())
+                    .or_insert_with(|| provider.get_event(&id).map(|ev| ev.auth_events.clone()));
+                match auth {
+                    Some(auth) => stack.extend(auth.iter().cloned()),
+                    None => missing.push(id),
                 }
             }
             union |= &chain;

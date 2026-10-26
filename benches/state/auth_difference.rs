@@ -363,5 +363,32 @@ pub fn run() {
             },
             Some(&provider),
         );
+
+        // Hybrid: a graph missing the newest fraction of events (a topological
+        // suffix, as when recent events are not inserted yet), the rest walked
+        // through the provider.
+        for missing_pct in [0, 1, 10, 50, 100] {
+            let order = graph.index.items();
+            let keep = order.len() * (100 - missing_pct) / 100;
+            let mut partial =
+                rezzy::auth::roaring::AuthGraph::try_build(&HashMap::<String, LeanEvent>::new())
+                    .expect("empty set is auth-closed");
+            for id in &order[..keep] {
+                partial
+                    .insert(&fixture.events[id])
+                    .expect("topological prefix is auth-closed");
+            }
+            time_case(
+                &format!("hybrid/{missing_pct}%-unindexed diff-only"),
+                iterations,
+                || {
+                    partial
+                        .hybrid_state_auth_difference(&fixture.forks, &provider)
+                        .expect("fixture is complete")
+                        .len()
+                },
+                Some(&provider),
+            );
+        }
     }
 }
