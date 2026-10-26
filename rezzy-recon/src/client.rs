@@ -2649,7 +2649,6 @@ mod tests {
         assert_eq!(exchange.ladder_failed(), []);
     }
 
-    /// The children of a split may arrive in different rounds. When they do not
     fn start_root_split_exchange() -> BucketExchange {
         let mut exchange = fresh_exchange();
         let _ = advance_single_symmetric(
@@ -2672,6 +2671,7 @@ mod tests {
         }
     }
 
+    /// The children of a split may arrive in different rounds. When they do not
     /// add up to the parent the responder is inconsistent, which no capacity
     /// bump or split can fix: the parent goes straight to ladder-failed, and
     /// the child already admitted is withdrawn.

@@ -288,6 +288,35 @@ pub(crate) fn time_case(
     );
 }
 
+fn verify_resolver_results(fixture: &Fixture, provider: &CountingProvider<'_>) -> StateMap {
+    let concrete = rezzy::resolve_state_maps(&fixture.forks, &fixture.events, StateResVersion::V2);
+    let lazy = rezzy::resolve_state_maps_lazy_with_diff(
+        &fixture.forks,
+        provider,
+        None::<Vec<String>>,
+        StateResVersion::V2,
+    );
+    let graph = rezzy::auth::roaring::AuthGraph::try_build(&fixture.events)
+        .expect("fixture is auth-closed");
+    let precomputed = rezzy::resolve_state_maps_lazy_with_diff(
+        &fixture.forks,
+        provider,
+        Some(graph.state_auth_difference(&fixture.forks)),
+        StateResVersion::V2,
+    );
+    assert_eq!(lazy, concrete, "lazy result matches concrete reference");
+    assert_eq!(
+        precomputed, concrete,
+        "precomputed result matches reference"
+    );
+    concrete
+}
+
+fn sorted(mut ids: Vec<String>) -> Vec<String> {
+    ids.sort();
+    ids
+}
+
 /// Runs large-room auth-difference timings for the concrete and lazy APIs.
 pub fn run() {
     for (members, chain_len, iterations) in [(1_000, 32, 5), (10_000, 64, 3)] {
@@ -299,6 +328,7 @@ pub fn run() {
             events: &fixture.events,
             lookups: AtomicUsize::new(0),
         };
+        let reference_state = verify_resolver_results(&fixture, &provider);
 
         time_case(
             "concrete/computed-diff",
@@ -381,20 +411,32 @@ pub fn run() {
             Some(&provider),
         );
 
-        // Hybrid: a graph missing the newest fraction of events (a topological
-        // suffix, as when recent events are not inserted yet), the rest walked
-        // through the provider.
+        // Select accepted events by descending depth, then ID, before building
+        // the partial graph. This makes the omitted set deterministic despite
+        // AuthGraph's HashMap-derived tie ordering.
         for missing_pct in [0, 1, 10, 50, 100] {
-            let order = graph.index.items();
+            let mut order: Vec<_> = fixture.events.values().collect();
+            order.sort_by(|a, b| {
+                b.depth
+                    .cmp(&a.depth)
+                    .then_with(|| a.event_id.cmp(&b.event_id))
+            });
             let keep = order.len() * (100 - missing_pct) / 100;
             let mut partial =
                 rezzy::auth::roaring::AuthGraph::try_build(&HashMap::<String, LeanEvent>::new())
                     .expect("empty set is auth-closed");
             let insert_start = Instant::now();
-            for id in &order[..keep] {
+            let selected: std::collections::HashSet<_> = order[order.len() - keep..]
+                .iter()
+                .map(|event| event.event_id.as_str())
+                .collect();
+            for id in graph.index.items() {
+                if !selected.contains(id.as_str()) {
+                    continue;
+                }
                 partial
                     .insert(&fixture.events[id])
-                    .expect("topological prefix is auth-closed");
+                    .expect("depth-ordered event set is auth-closed");
             }
             if missing_pct == 0 {
                 // Graph update cost: every event inserted one at a time, as a
@@ -405,6 +447,24 @@ pub fn run() {
                     us / keep as f64
                 );
             }
+            let hybrid_diff = partial
+                .hybrid_state_auth_difference(&fixture.forks, &provider)
+                .expect("fixture is complete");
+            assert_eq!(
+                sorted(hybrid_diff.clone()),
+                sorted(graph.state_auth_difference(&fixture.forks)),
+                "hybrid diff matches the full graph for {missing_pct}% unindexed"
+            );
+            let hybrid_state = rezzy::resolve_state_maps_lazy_with_diff(
+                &fixture.forks,
+                &provider,
+                Some(hybrid_diff),
+                StateResVersion::V2,
+            );
+            assert_eq!(
+                hybrid_state, reference_state,
+                "hybrid resolution matches the concrete reference for {missing_pct}% unindexed"
+            );
             time_case(
                 &format!("hybrid/{missing_pct}%-unindexed diff-only"),
                 iterations,

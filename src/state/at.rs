@@ -1504,7 +1504,7 @@ impl<'a, Id, C, S, K> MergeContext<'a, Id, C, S, K> {
 /// identical parents — is returned as-is, bypassing state resolution entirely.
 /// Multiple distinct parents go through the full state-resolution path, which
 /// groups the unconflicted state and runs the iterative sort on the conflicted
-/// subset (including the auth chain difference `auth(C) \ auth(U)`).
+/// subset (including the state-map auth difference `∪ Cᵢ − ∩ Cᵢ`).
 pub(crate) fn resolve_merged_parent_states<Id, C, S, K>(
     prev_states: &[SharedState<Id, K>],
     ctx: &mut MergeContext<'_, Id, C, S, K>,
@@ -1559,11 +1559,26 @@ where
         }
     }
 
-    // Supplement conflicted_events with the auth difference auth(C) \ auth(U).
-    // V1 does not compute or resolve an auth difference.
+    // V2 resolves the state-map auth difference. V1 does not compute one.
     if ctx.version != StateResVersion::V1 {
-        let auth_diff =
-            compute_auth_chain_diff(&unconflicted_state, &conflicted_state_set, events_map);
+        let conflicted_ids: Vec<_> = conflicted_state_set.iter().cloned().collect();
+        let auth_diff = crate::resolve::multi::auth_difference(
+            &unconflicted_state,
+            &prev_states,
+            &conflicted_ids,
+            |id, with_auth| {
+                events_map.get(id).map(|ev| {
+                    (
+                        ev.depth,
+                        if with_auth {
+                            ev.auth_events.clone()
+                        } else {
+                            Vec::new()
+                        },
+                    )
+                })
+            },
+        );
         for id_val in auth_diff {
             if let Some(event) = events_map.get(&id_val) {
                 conflicted_events.insert(id_val, event.clone());
@@ -3767,6 +3782,67 @@ mod tests {
         let state = result.unwrap();
         // create event should be in state
         assert!(state.contains_key(&("m.room.create".into(), String::new())));
+    }
+
+    #[test]
+    fn test_compute_state_at_shared_auth_ancestor_matches_merge_resolver() {
+        let a = LeanEvent {
+            depth: 1,
+            ..create_v10("A", "@admin:x")
+        };
+        let left = LeanEvent {
+            depth: 2,
+            prev_events: vec!["A".into()],
+            auth_events: vec!["A".into()],
+            ..member_join("left", "@alice:x", "@alice:x")
+        };
+        let right = LeanEvent {
+            depth: 2,
+            prev_events: vec!["A".into()],
+            auth_events: vec!["A".into()],
+            ..member_join("right", "@bob:x", "@bob:x")
+        };
+        let target = LeanEvent {
+            depth: 3,
+            prev_events: vec!["left".into(), "right".into()],
+            auth_events: vec!["A".into(), "left".into(), "right".into()],
+            ..test_event("target", "m.room.message", "@admin:x")
+        };
+        let events = test_events_map(vec![a, left, right, target]);
+        let state = compute_state_at(
+            &"target".to_string(),
+            &events,
+            StateResVersion::V2,
+            &String::new(),
+        )
+        .expect("target state resolves");
+        let parents = ["left", "right"]
+            .iter()
+            .map(|id| {
+                compute_state_at(
+                    &id.to_string(),
+                    &events,
+                    StateResVersion::V2,
+                    &String::new(),
+                )
+                .expect("parent state resolves")
+                .into_iter()
+                .collect::<SharedState>()
+            })
+            .collect::<Vec<_>>();
+        let mut caches = LocalAuthCache::new(StateResVersion::V2);
+        let mut mainline = FastMap::default();
+        let expected = resolve_merged_parent_states(
+            &parents,
+            &mut MergeContext::new(
+                &events,
+                &mut caches,
+                &mut mainline,
+                StateResVersion::V2,
+                &String::new(),
+            ),
+        );
+        assert_eq!(state, expected.into_iter().collect());
     }
 
     #[test]

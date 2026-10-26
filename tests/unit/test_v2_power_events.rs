@@ -643,7 +643,10 @@ fn test_auth_graph_insert_refuses_missing_auth_events() {
     assert_eq!(graph.insert(&map["$create"]), Ok(true));
 
     let err = graph.insert(&map["$m_a"]).unwrap_err();
-    let mut missing = err.missing.clone();
+    let rezzy::auth::roaring::InsertError::Missing(missing) = err else {
+        panic!("expected missing auth events");
+    };
+    let mut missing = missing.missing;
     missing.sort();
     assert_eq!(missing, ["$bob_join", "$jr", "$pl"]);
     assert_eq!(
@@ -662,7 +665,10 @@ fn test_auth_graph_try_build_refuses_missing_auth_events() {
     let err = rezzy::auth::roaring::AuthGraph::try_build(&map)
         .err()
         .expect("$pl is cited but absent");
-    assert_eq!(err.missing, ["$pl"]);
+    let rezzy::auth::roaring::BuildError::Missing(missing) = err else {
+        panic!("expected missing auth events");
+    };
+    assert_eq!(missing.missing, ["$pl"]);
     assert!(rezzy::auth::roaring::AuthGraph::try_build(&room_with_chain(true)).is_ok());
 }
 

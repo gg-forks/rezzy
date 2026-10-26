@@ -94,7 +94,7 @@ A caveat on the conduwuit column: it is based on the `state_compressor` I know. 
 | Memory with many cached states | Shared subtrees | Each cached map is separate | Each layer's `full_state` is its own set, so roughly S × 16 B per cached state |
 | GC | Content-addressed sharing. Refcounting is only sound for linear histories (see your own `gc.rs` doc), so in practice it needs a full mark-sweep. | Cascading purges, plus the external compressor | Effectively never |
 
-On writes, the HAMT strictly dominates Synapse's amortized cost on large rooms. It loses to both alternatives on bytes per transition only when compared against an idealized pure-delta scheme. It dominates both on reads and on divergence-proportional state resolution.
+On writes, the HAMT strictly dominates Synapse's amortized cost on large rooms. It loses to both alternatives on bytes per transition only when compared against an idealized pure-delta scheme. It dominates both on point reads and divergence-proportional state resolution, excluding type-filtered reads.
 
 The one place it is clearly worse than Synapse is **type-filtered reads**. That covers lazy-loading members, `/members`, and `StateFilter`-style queries in general.
 
@@ -144,6 +144,8 @@ On the read side, `into_hamt_node_verified` re-encodes the node just to hash it.
 
 ## Issues in the code that change the answer
 
+> **Status (historical, fixed):** the `diff_nodes` leaf-versus-subtree bug described below was fixed in `src/hamt/delta.rs` (commits `dd3c7b09`, `4def5acf`) and is covered by `test_isolate_delta_leaf_subtree_transition`. The diagnosis is kept as originally written.
+
 **Real bug: `diff_nodes` mishandles a slot that holds a leaf on one side and a subtree on the other.**
 
 The datamap loop and the nodemap loop are independent. When A has a leaf `(k, v)` at slot s and B has a child at s, the datamap loop emits `removed (k, v)`. The nodemap loop then walks B's subtree and emits `added (k, v)` along with the genuinely new key.
@@ -187,9 +189,11 @@ For the regression test, build `a = {k1: 1}` and `b = insert(a, k2)`, where k2 s
 **Medium: lookups conflate corruption with absence.**
 
 - `search_by_path_hash` returns `Ok(None)` after running past `HAMT_MAX_DEPTH`, and `test_hamt_search_by_path_hash_rejects_excessive_depth` pins that behaviour.
-- `get` returns `None` when it reaches a `Lazy` child.
+- `get` is the fully materialized API; `search` is the lazy API and returns
+  resolver errors when a child cannot be loaded.
 
-For auth, "no power_levels event" and "store is broken" must not be the same answer. Return a tri-state, `Found(V) | Absent | Unresolvable`, or return an error instead. The traversal APIs already do the latter.
+Auth callers that need lazy reads should use `search` so "no power_levels
+event" and a resolver failure remain distinct.
 
 **Doc accuracy in `hash.rs`.** The claim that grinding k ≤ 10 levels is "practical (seconds)" overstates the attack. 2^(5·10) = 2^50 hashes is GPU-days, not seconds; "seconds" holds for roughly k ≈ 5–6. Matching any of the S existing keys divides the cost by S. The conclusion still stands, since depth is bounded at 52 and the damage is a slowdown, but you'll want the numbers right if this threat model ends up in a paper.
 

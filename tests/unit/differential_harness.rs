@@ -346,7 +346,8 @@ fn resolve(p: &Problem, version: StateResVersion) -> SharedState {
 /// Differential coverage over the multi-level random DAG generator.
 ///
 /// Resolves each DAG with stock `V2_1` and rezzy's hardened `V2_1_1`, then
-/// asserts stock V2.1 restores every unconflicted entry in its final output.
+/// asserts both V2.1 and V2.1.1 restore every unconflicted entry in their final
+/// output.
 ///
 /// The versions may differ for unconflicted keys because V2.1.1 preserves
 /// rezzy's resolved-wins hardening. This does not exercise CDO behavior.
@@ -361,13 +362,15 @@ fn differential_v21_restores_unconflicted_state() {
     run_parallel(ITER_COUNT, |iter| {
         let mut rng = iteration_rng(BASE_SEED, iter);
         let problem = gen_problem(&mut rng, 1000 + iter * 13);
-        let r21 = resolve(&problem, StateResVersion::V2_1);
-        for (key, expected) in &problem.unconflicted {
-            assert_eq!(
-                r21.get(key),
-                Some(expected),
-                "V2.1 failed to restore unconflicted key on DAG iteration {iter}: {key:?}"
-            );
+        for version in [StateResVersion::V2_1, StateResVersion::V2_1_1] {
+            let resolved = resolve(&problem, version);
+            for (key, expected) in &problem.unconflicted {
+                assert_eq!(
+                    resolved.get(key),
+                    Some(expected),
+                    "{version:?} failed to restore unconflicted key on DAG iteration {iter}: {key:?}"
+                );
+            }
         }
     });
 }

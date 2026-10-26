@@ -1024,6 +1024,10 @@ mod tests {
             (EventType::from("m.room.name"), String::new()),
             "$name_bob".into(),
         );
+        state_bob.insert(
+            (EventType::from("m.room.power_levels"), String::new()),
+            "$pl_diff".into(),
+        );
 
         let auth_graph = rezzy::auth::roaring::AuthGraph::build(&events);
         let heads = vec!["$name_alice".to_string(), "$name_bob".to_string()];
@@ -1039,8 +1043,8 @@ mod tests {
         let name_key = (EventType::from("m.room.name"), String::new());
         assert_eq!(
             resolved.get(&name_key).map(String::as_str),
-            Some("$name_alice"),
-            "V1 partition_and_resolve_state skips auth difference"
+            Some("$name_bob"),
+            "V1 partition_and_resolve_state resolves the conflicting state maps"
         );
     }
 

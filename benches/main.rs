@@ -48,6 +48,7 @@ const BENCHMARKS: &[BenchmarkEntry] = &[
         description: "Large-room concrete/lazy resolution with computed or precomputed auth diff",
         run_fn: state::auth_difference::run,
     },
+    #[cfg(feature = "mtxdb")]
     BenchmarkEntry {
         domain: "state",
         name: "auth_difference_mtxdb",

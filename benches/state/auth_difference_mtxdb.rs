@@ -8,7 +8,7 @@
 //! these are warm-cache numbers.
 //!
 //! Run with `cargo +1.90.0 bench --manifest-path benches/Cargo.toml --bench
-//! rezzy -- auth_difference_mtxdb`.
+//! rezzy --features mtxdb -- auth_difference_mtxdb`.
 
 use std::cell::OnceCell;
 use std::collections::HashMap;
@@ -55,7 +55,7 @@ fn pdu_json(ev: &LeanEvent) -> String {
 /// A room stored in a fresh mtxdb database.
 struct Store {
     root: PathBuf,
-    db: Database,
+    db: Option<Database>,
     closure: AuthClosure,
     adjacency: MatrixAdjacency,
     /// Short id to event id; mtxdb's persisted closures are short-id bitmaps.
@@ -64,8 +64,18 @@ struct Store {
     shorts: HashMap<String, u32>,
 }
 
+impl Store {
+    fn db(&self) -> &Database {
+        self.db
+            .as_ref()
+            .expect("store database remains open during use")
+    }
+}
+
 impl Drop for Store {
     fn drop(&mut self) {
+        // Database owns open files under root; close it before directory cleanup.
+        drop(self.db.take());
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
@@ -115,7 +125,7 @@ fn store_fixture(fixture: &Fixture, name: &str) -> Store {
     let closure = AuthClosure::from_adjacency(adjacency);
     Store {
         root,
-        db,
+        db: Some(db),
         closure,
         adjacency,
         labels,
@@ -150,7 +160,7 @@ impl<'a> MtxdbProvider<'a> {
         self.reads.fetch_add(1, Ordering::Relaxed);
         let record = self
             .store
-            .db
+            .db()
             .event_dag()
             .get(&EVENTS_COLLECTION, &node_id(id))
             .expect("read event")?;
@@ -177,12 +187,12 @@ fn mtxdb_auth_difference(store: &Store, forks: &[StateMap]) -> Vec<String> {
         for id in state.values() {
             let short = store
                 .adjacency
-                .short_id(&store.db, id)
+                .short_id(&store.db(), id)
                 .expect("read short id")
                 .expect("state event is recorded");
             let mut closure = store
                 .closure
-                .get_at(&store.db, short)
+                .get_at(&store.db(), short)
                 .expect("read closure")
                 .expect("closure is published");
             closure.insert(short);
@@ -224,7 +234,7 @@ fn mtxdb_auth_difference_merged(store: &Store, forks: &[StateMap]) -> Vec<String
         into.extend(
             store
                 .closure
-                .get_at(&store.db, short)
+                .get_at(&store.db(), short)
                 .expect("read closure")
                 .expect("closure is published")
                 .iter(),
@@ -314,7 +324,10 @@ pub fn run() {
         let store = store_fixture(&fixture, &members.to_string());
         let write_ms = start.elapsed().as_secs_f64() * 1_000.0;
         let start = Instant::now();
-        let report = store.closure.rebuild(&store.db).expect("rebuild closures");
+        let report = store
+            .closure
+            .rebuild(&store.db())
+            .expect("rebuild closures");
         let rebuild_ms = start.elapsed().as_secs_f64() * 1_000.0;
         assert!(report.is_complete(), "fixture closures are complete");
         println!(

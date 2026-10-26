@@ -26,6 +26,24 @@ pub struct MissingEvents<Id> {
     pub missing: Vec<Id>,
 }
 
+/// Why adding an event to an [`AuthGraph`] failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InsertError<Id> {
+    /// An auth event has not been inserted yet.
+    Missing(MissingEvents<Id>),
+    /// The dense index could not be extended.
+    IndexTooLarge(crate::dense_index::IndexTooLarge),
+}
+
+/// Why building an [`AuthGraph`] failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BuildError<Id> {
+    /// An auth event is absent from the provided event set.
+    Missing(MissingEvents<Id>),
+    /// A cycle prevents a full topological ordering.
+    Cyclic,
+}
+
 impl<Id: Ord> MissingEvents<Id> {
     /// `Err` naming `missing` (sorted, deduplicated), or `Ok` if it is empty.
     fn check(mut missing: Vec<Id>) -> Result<(), Self> {
@@ -49,6 +67,28 @@ impl<Id: core::fmt::Debug> core::fmt::Display for MissingEvents<Id> {
 }
 
 impl<Id: core::fmt::Debug> core::error::Error for MissingEvents<Id> {}
+
+impl<Id: core::fmt::Debug> core::fmt::Display for InsertError<Id> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Missing(err) => err.fmt(f),
+            Self::IndexTooLarge(err) => err.fmt(f),
+        }
+    }
+}
+
+impl<Id: core::fmt::Debug> core::error::Error for InsertError<Id> {}
+
+impl<Id: core::fmt::Debug> core::fmt::Display for BuildError<Id> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Missing(err) => err.fmt(f),
+            Self::Cyclic => f.write_str("auth graph contains a cycle"),
+        }
+    }
+}
+
+impl<Id: core::fmt::Debug> core::error::Error for BuildError<Id> {}
 
 /// Why [`AuthGraph::hybrid_state_auth_difference`] could not compute an exact
 /// difference.
@@ -175,7 +215,8 @@ where
         self.complete
     }
 
-    /// [`Self::build`], but refuses an event set that is not auth-closed.
+    /// [`Self::build`], but refuses an event set that is not auth-closed or
+    /// acyclic.
     ///
     /// `build` skips auth events missing from `sort_context`, so their
     /// descendants' bitmaps silently lack them. This returns every such auth
@@ -183,14 +224,15 @@ where
     /// incomplete.
     ///
     /// # Errors
-    /// Returns [`MissingEvents`] listing auth events cited in `sort_context`
-    /// but not present in it.
+    /// Returns [`BuildError::Missing`] listing auth events cited in
+    /// `sort_context` but not present in it, or [`BuildError::Cyclic`] if a
+    /// cycle prevents a complete topological ordering.
     ///
     /// # Panics
     /// As [`Self::build`].
     pub fn try_build<C: Clone, S: core::hash::BuildHasher>(
         sort_context: &HashMap<Id, LeanEvent<Id, C>, S>,
-    ) -> Result<Self, MissingEvents<Id>> {
+    ) -> Result<Self, BuildError<Id>> {
         MissingEvents::check(
             sort_context
                 .values()
@@ -198,8 +240,13 @@ where
                 .filter(|id| !sort_context.contains_key(*id))
                 .cloned()
                 .collect(),
-        )?;
-        Ok(Self::build(sort_context))
+        )
+        .map_err(BuildError::Missing)?;
+        let graph = Self::build(sort_context);
+        if !graph.complete {
+            return Err(BuildError::Cyclic);
+        }
+        Ok(graph)
     }
 
     /// Compute the **auth chain difference**:
@@ -265,13 +312,9 @@ where
     /// Returns `Ok(false)` if the event was already present.
     ///
     /// # Errors
-    /// Returns [`MissingEvents`] listing the auth events not yet in the
-    /// graph.
-    ///
-    /// # Panics
-    /// Panics if the graph already holds as many events as a `u32` index can
-    /// address, as [`Self::build`] does.
-    pub fn insert<C>(&mut self, event: &LeanEvent<Id, C>) -> Result<bool, MissingEvents<Id>> {
+    /// Returns [`InsertError::Missing`] if an auth event is not in the graph,
+    /// or [`InsertError::IndexTooLarge`] if the graph cannot be extended.
+    pub fn insert<C>(&mut self, event: &LeanEvent<Id, C>) -> Result<bool, InsertError<Id>> {
         if self.index.index_of(&event.event_id).is_some() {
             return Ok(false);
         }
@@ -282,7 +325,8 @@ where
                 .filter(|id| self.index.index_of(id).is_none())
                 .cloned()
                 .collect(),
-        )?;
+        )
+        .map_err(InsertError::Missing)?;
         let mut bitmap = Bitmap::new();
         for auth_id in &event.auth_events {
             if let Some(p_idx) = self.index.index_of(auth_id) {
@@ -292,7 +336,7 @@ where
         }
         self.index
             .try_push(event.event_id.clone())
-            .expect("auth graph event count fits in a u32 index");
+            .map_err(InsertError::IndexTooLarge)?;
         self.auth_bitmaps.push(bitmap);
         Ok(true)
     }

@@ -215,12 +215,14 @@ where
 /// events of its conflicted state events, deepest first, and the unconflicted
 /// chain is only advanced as far as needed to stop that walk where the two
 /// meet. The pruning assumes auth events have a smaller `depth` than the
-/// events citing them. Events that `event_auth` cannot find are skipped.
+/// events citing them. `event_auth` must therefore cover every state event
+/// and every event in their auth closure; an event it cannot find is skipped,
+/// which can leave a shared ancestor in the difference.
 ///
 /// `event_auth(id, with_auth)` returns the event's depth and, only when
 /// `with_auth` is set, its auth events; depth-only calls (most of them, for the
 /// unconflicted seeds) can then skip copying the auth list.
-fn auth_difference<Id, K>(
+pub(crate) fn auth_difference<Id, K>(
     unconflicted_state: &SharedState<Id, K>,
     state_maps: &[SharedState<Id, K>],
     conflicted_ids: &[Id],
@@ -348,8 +350,10 @@ fn enqueue_conflicted_auth_events<Id, F>(
 ///
 /// - `state_maps`: Slice of N state maps (one per fork/extremity).
 /// - `event_context`: The events needed for resolution. At minimum this
-///   must contain every conflicted state event (referenced by the state
-///   maps) **and** the transitive closure of their auth chains. Passing
+///   must contain every state event in `state_maps` — unconflicted as well as
+///   conflicted — **and** the transitive closure of their auth chains. The
+///   unconflicted chain is needed to prune shared ancestors from the auth
+///   difference; omitting it can make that difference over-inclusive. Passing
 ///   a full event map also works — extra events are harmless but waste
 ///   memory. Homeservers with compressed auth-chain bitmaps can pass
 ///   just the auth chain for optimal performance.
@@ -726,16 +730,14 @@ fn lazy_auth_difference<Id, C>(
     state_maps: &[SharedState<Id>],
     conflicted_ids: &[Id],
     provider: &impl EventProvider<Id, C>,
-    fetched_events: &HashMap<Id, LeanEvent<Id, C>>,
+    fetched_events: &mut HashMap<Id, LeanEvent<Id, C>>,
 ) -> Vec<Id>
 where
     Id: EventId,
     C: EventContent + Clone,
 {
-    // Depth-only reads keep just the depth and auth list, so seeding from the
-    // unconflicted state copies no event bodies and a later full read of the
-    // same event needs no second provider lookup.
-    let mut seen: crate::FastMap<Id, (u64, Vec<Id>)> = crate::FastMap::default();
+    // Cache each event as it is read so materializing the returned difference
+    // does not fetch the same event from the provider a second time.
     auth_difference(
         unconflicted_state,
         state_maps,
@@ -747,13 +749,9 @@ where
             if let Some(ev) = fetched_events.get(id) {
                 return Some(pick(ev.depth, &ev.auth_events));
             }
-            if let Some((depth, auth)) = seen.get(id) {
-                return Some(pick(*depth, auth));
-            }
             let ev = provider.get_event(id)?;
-            let result = pick(ev.depth, &ev.auth_events);
-            seen.insert(id.clone(), (ev.depth, ev.auth_events.clone()));
-            Some(result)
+            fetched_events.insert(id.clone(), ev.clone());
+            Some(pick(ev.depth, &ev.auth_events))
         },
     )
 }
@@ -898,7 +896,7 @@ where
                 state_maps,
                 &conflicted_ids,
                 provider,
-                &fetched_events,
+                &mut fetched_events,
             ),
         }
     };

@@ -938,7 +938,9 @@ pub fn reference_hash(
     let encoded = core::str::from_utf8(&encoded[..length]).map_err(|error| {
         alloc::format!("reference hash encoder returned invalid UTF-8: {error}")
     })?;
-    let mut hash = String::with_capacity(43);
+    // One spare byte lets `from_value` prepend the `$` event-ID sigil without
+    // reallocating the returned hash.
+    let mut hash = String::with_capacity(44);
     hash.push_str(encoded);
     Ok(hash)
 }
@@ -3531,8 +3533,9 @@ impl LeanEvent<String, Value, String> {
         let event_id = if let Some(id) = value.get(FIELD_EVENT_ID).and_then(|v| v.as_str()) {
             String::from(id)
         } else if let Some(ver) = room_version {
-            let hash = reference_hash(value, ver)?;
-            alloc::format!("${hash}")
+            let mut hash = reference_hash(value, ver)?;
+            hash.insert(0, '$');
+            hash
         } else {
             return Err(String::from(
                 "event_id is required; pass `room_version` to `from_value` to derive it via the reference hash",
