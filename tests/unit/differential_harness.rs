@@ -1,9 +1,10 @@
 //! Differential + determinism harness for state resolution.
 //!
 //! Phase B empirical backbone. For each randomly-generated room DAG:
-//! - **Differential:** resolve with `V2_1` and `V2_1_1`; stock V2.1 must
-//!   restore all unconflicted entries, while V2.1.1 retains rezzy's
-//!   resolved-wins hardening. A drop is sound iff
+//! - **Differential:** resolve with `V2_1` and `V2_1_1`; both versions must
+//!   restore all unconflicted entries in the final merge. V2.1.1 retains
+//!   rezzy's resolved-wins hardening during iterative checks, but agreed
+//!   values still take precedence in the final output. A drop is sound iff
 //!   `IterativeAuthChecks` would have rejected the event; the retired CDO
 //!   pre-filter could not establish that, and the differential is how its
 //!   violations were caught.

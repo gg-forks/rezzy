@@ -3850,6 +3850,77 @@ mod tests {
     }
 
     #[test]
+    fn test_compute_state_at_shared_auth_event_outside_state_maps() {
+        // `X` is a shared auth ancestor of both conflicting `m.room.name`
+        // events but is replaced in each parent state, so it is in neither
+        // parent state map nor the unconflicted state. It lies in
+        // `auth(C) \ auth(U)` yet outside `∪ Cᵢ − ∩ Cᵢ`, so it must not be
+        // pulled into the resolved result.
+        let name = |id: &str, prev: &str, auth: Vec<String>| LeanEvent {
+            depth: 3,
+            state_key: Some(String::new()),
+            prev_events: vec![prev.into()],
+            auth_events: auth,
+            ..test_event(id, "m.room.name", "@admin:x")
+        };
+        let a = LeanEvent {
+            depth: 1,
+            ..create_v10("A", "@admin:x")
+        };
+        let x = LeanEvent {
+            depth: 2,
+            ..name("X", "A", vec!["A".into()])
+        };
+        let left = name("left", "X", vec!["A".into(), "X".into()]);
+        let right = name("right", "X", vec!["A".into(), "X".into()]);
+        let target = LeanEvent {
+            depth: 4,
+            prev_events: vec!["left".into(), "right".into()],
+            auth_events: vec!["A".into()],
+            ..test_event("target", "m.room.message", "@admin:x")
+        };
+        let events = test_events_map(vec![a, x, left, right, target]);
+        let parents = ["left", "right"]
+            .iter()
+            .map(|id| {
+                compute_state_at(
+                    &(*id).to_string(),
+                    &events,
+                    StateResVersion::V2,
+                    &String::new(),
+                )
+                .expect("parent state resolves")
+            })
+            .collect::<Vec<_>>();
+        for parent in &parents {
+            assert!(
+                !parent.values().any(|id| id == "X"),
+                "X must be absent from every parent state map"
+            );
+        }
+        let state = compute_state_at(
+            &"target".to_string(),
+            &events,
+            StateResVersion::V2,
+            &String::new(),
+        )
+        .expect("target state resolves");
+        let expected = crate::resolve::multi::resolve_state_maps(
+            &parents
+                .iter()
+                .map(|p| p.clone().into_iter().collect::<SharedState>())
+                .collect::<Vec<_>>(),
+            &events,
+            StateResVersion::V2,
+        );
+        assert_eq!(state, expected.into_iter().collect());
+        assert!(
+            !state.values().any(|id| id == "X"),
+            "shared auth ancestor X must not be resolved into the state"
+        );
+    }
+
+    #[test]
     fn test_hashed_state_incremental() {
         let mut hs = HashedState::new();
         hs.insert(

@@ -441,15 +441,18 @@ pub fn run() {
             let mut partial =
                 rezzy::auth::roaring::AuthGraph::try_build(&HashMap::<String, LeanEvent>::new())
                     .expect("empty set is auth-closed");
-            let insert_start = Instant::now();
             let selected: std::collections::HashSet<_> = order[order.len() - keep..]
                 .iter()
                 .map(|event| event.event_id.as_str())
                 .collect();
-            for id in graph.index.items() {
-                if !selected.contains(id.as_str()) {
-                    continue;
-                }
+            let to_insert: Vec<&String> = graph
+                .index
+                .items()
+                .iter()
+                .filter(|id| selected.contains(id.as_str()))
+                .collect();
+            let insert_start = Instant::now();
+            for id in to_insert {
                 partial
                     .insert(&fixture.events[id])
                     .expect("depth-ordered event set is auth-closed");

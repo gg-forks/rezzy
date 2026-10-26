@@ -1054,9 +1054,11 @@ where
     Id: Clone,
     K: Clone + Ord,
 {
-    let mut f = resolved;
-    for (k, v) in unconflicted_state {
-        f.insert(k, v);
+    let mut f = unconflicted_state;
+    for (k, v) in resolved {
+        if !f.contains_key(&k) {
+            f.insert(k, v);
+        }
     }
     f
 }

@@ -49,9 +49,9 @@ fn guard(out: *mut *mut u8, out_len: *mut usize, body: impl FnOnce() -> i32) -> 
 /// # Safety
 /// `room_version` must be NUL-terminated and `input` must point to `input_len`
 /// readable bytes, whenever they are non-null. Non-null `out` and `out_len`
-/// must point to writable storage. Input storage must remain valid and
-/// unmodified for the lifetime of the returned borrows and must not overlap
-/// the output slots.
+/// must point to writable storage. The room-version and input storage must
+/// remain valid and unchanged for the lifetime of the returned borrows. Neither
+/// may overlap either output slot.
 unsafe fn unpack_raw_args<'a>(
     room_version: *const c_char,
     input: *const u8,
@@ -84,7 +84,7 @@ unsafe fn unpack_raw_args<'a>(
 /// error bytes.
 ///
 /// Returns `OK` on success; `op` returning `None` leaves output null with zero
-/// length. Invalid pointers or a non-UTF-8 version return `BAD_ARG` without a
+/// length. Null pointers or a non-UTF-8 version return `BAD_ARG` without a
 /// buffer. JSON errors, operation errors, and caught panics return `ERR` with
 /// an allocated message, released with [`rezzy_free`].
 ///

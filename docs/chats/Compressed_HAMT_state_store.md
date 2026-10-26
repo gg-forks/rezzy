@@ -94,7 +94,7 @@ A caveat on the conduwuit column: it is based on the `state_compressor` I know. 
 | Memory with many cached states | Shared subtrees | Each cached map is separate | Each layer's `full_state` is its own set, so roughly S × 16 B per cached state |
 | GC | Content-addressed sharing. Refcounting is only sound for linear histories (see your own `gc.rs` doc), so in practice it needs a full mark-sweep. | Cascading purges, plus the external compressor | Effectively never |
 
-On writes, the HAMT strictly dominates Synapse's amortized cost on large rooms. It loses to both alternatives on bytes per transition only when compared against an idealized pure-delta scheme. It dominates both on point reads and divergence-proportional state resolution, excluding type-filtered reads.
+On writes, under the stated assumptions the HAMT writes fewer bytes per transition than Synapse's amortized snapshot-plus-delta scheme on large rooms. That is a bytes-written comparison only: it does not account for CPU cost, and it loses on bytes per transition to an idealized pure-delta scheme. It dominates both on point reads and divergence-proportional state resolution, excluding type-filtered reads.
 
 The one place it is clearly worse than Synapse is **type-filtered reads**. That covers lazy-loading members, `/members`, and `StateFilter`-style queries in general.
 
