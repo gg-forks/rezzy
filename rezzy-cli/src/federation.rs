@@ -6,7 +6,7 @@ use base64::{
     Engine as _,
 };
 use clap::{Arg, ArgAction, ArgMatches, Command};
-use ed25519_zebra::SigningKey;
+use ed25519_zebra::{SigningKey, VerificationKey};
 use rezzy::JsonValue;
 mod state_diff;
 
@@ -691,14 +691,22 @@ fn parse_conduwuit_keypair(hex: &str) -> Result<SigningKeySpec, String> {
             !version.is_empty() && version.bytes().all(|byte| byte.is_ascii_graphic())
         })
         .ok_or("conduwuit keypair has no ASCII key version")?;
-    let seed: [u8; 32] = bytes[split + 1..]
+    let malformed = "conduwuit keypair is not a PKCS#8 Ed25519 private key";
+    let rest = bytes[split + 1..]
         .strip_prefix(&PKCS8_ED25519_PREFIX)
-        .and_then(|rest| rest.get(..32))
-        .and_then(|seed| seed.try_into().ok())
-        .ok_or("conduwuit keypair is not a PKCS#8 Ed25519 private key")?;
+        .ok_or(malformed)?;
+    // seed, then the `[1]` public-key field `81 21 00 <pub>`, and nothing after.
+    let (seed, public) = rest
+        .split_first_chunk::<32>()
+        .and_then(|(seed, tail)| Some((seed, tail.strip_prefix(&[0x81, 0x21, 0x00])?)))
+        .ok_or(malformed)?;
+    let key = SigningKey::from(*seed);
+    if public != <[u8; 32]>::from(VerificationKey::from(&key)) {
+        return Err("conduwuit keypair public key does not match its seed".to_owned());
+    }
     Ok(SigningKeySpec {
         key_id: format!("ed25519:{version}"),
-        key: SigningKey::from(seed),
+        key,
     })
 }
 
@@ -2482,8 +2490,8 @@ fn write_frontier_checkpoint(path: &Path, frontier: &[String]) -> Result<(), App
 #[cfg(test)]
 mod tests {
     use super::{
-        domain_env_suffix, parse_signing_key, AppError, ErrorCode, FetchFailures,
-        PKCS8_ED25519_PREFIX,
+        domain_env_suffix, parse_signing_key, AppError, ErrorCode, FetchFailures, SigningKey,
+        VerificationKey, PKCS8_ED25519_PREFIX,
     };
 
     fn test_dag_request<'a>(
@@ -2550,7 +2558,9 @@ mod tests {
         bytes.extend_from_slice(&PKCS8_ED25519_PREFIX);
         bytes.extend_from_slice(&seed);
         bytes.extend_from_slice(&[0x81, 0x21, 0x00]);
-        bytes.extend_from_slice(&[7; 32]);
+        bytes.extend_from_slice(&<[u8; 32]>::from(VerificationKey::from(&SigningKey::from(
+            seed,
+        ))));
         let digits: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
         format!("0x{digits}")
     }
@@ -2570,6 +2580,21 @@ mod tests {
         assert!(parse_signing_key(&dump).is_err());
         assert!(parse_signing_key("0xabc").is_err());
         assert!(parse_signing_key("0x6161").is_err());
+    }
+
+    #[test]
+    fn refuses_a_truncated_or_mismatched_conduwuit_keypair() {
+        let dump = conduwuit_keypair_dump("0vhRKHKw", [9; 32]);
+        // Truncated public key, trailing byte, and a public key for another seed.
+        assert!(parse_signing_key(&dump[..dump.len() - 2]).is_err());
+        assert!(parse_signing_key(&format!("{dump}00")).is_err());
+        let mut wrong = dump.clone();
+        wrong.replace_range(dump.len() - 2.., "00");
+        assert!(parse_signing_key(&wrong).is_err());
+        // The DER sequence declares 81 content bytes; reject a different length.
+        let mut wrong_length = dump.clone();
+        wrong_length.replace_range(2 + 9 * 2 + 2..2 + 9 * 2 + 4, "00");
+        assert!(parse_signing_key(&wrong_length).is_err());
     }
 
     #[test]
