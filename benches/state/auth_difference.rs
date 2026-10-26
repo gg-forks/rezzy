@@ -324,10 +324,24 @@ pub fn run() {
         // A caller-held AuthGraph: built once, outside the timing, as a server
         // would keep it per room. Only the per-resolution diff is timed.
         let build_start = Instant::now();
-        let graph = rezzy::auth::roaring::AuthGraph::build(&fixture.events);
+        let graph = rezzy::auth::roaring::AuthGraph::try_build(&fixture.events)
+            .expect("fixture is auth-closed");
+        let build_ms = build_start.elapsed().as_secs_f64() * 1_000.0;
+        // Encoded size is a lower bound on the in-memory size, which adds
+        // per-bitmap Vec and per-chunk Arc overhead plus the id index.
+        let encoded: usize = graph.auth_bitmaps.iter().map(|b| b.encode().len()).sum();
+        let ancestors: u64 = graph
+            .auth_bitmaps
+            .iter()
+            .map(rezzy::bitmap::Bitmap::len)
+            .sum();
         println!(
-            "auth-graph build (once): {:.3} ms",
-            build_start.elapsed().as_secs_f64() * 1_000.0
+            "auth-graph build (once): {build_ms:.3} ms, {} events, {} ancestor bits, \
+             encoded bitmaps {:.1} KiB ({:.0} B/event)",
+            graph.auth_bitmaps.len(),
+            ancestors,
+            encoded as f64 / 1024.0,
+            encoded as f64 / graph.auth_bitmaps.len() as f64
         );
         time_case(
             "auth-graph/diff-only",

@@ -16,15 +16,29 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-/// [`AuthGraph::insert`] was given an event whose auth events are not all in
-/// the graph yet.
+/// Events an [`AuthGraph`] operation needed but could not find: auth events
+/// not yet inserted ([`AuthGraph::insert`]), auth events absent from the
+/// event set ([`AuthGraph::try_build`]), or state events not in the graph
+/// ([`AuthGraph::try_state_auth_difference`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MissingAuthEvents<Id> {
-    /// The auth events that must be inserted first.
+pub struct MissingEvents<Id> {
+    /// The missing event IDs, sorted and deduplicated.
     pub missing: Vec<Id>,
 }
 
-impl<Id: core::fmt::Debug> core::fmt::Display for MissingAuthEvents<Id> {
+impl<Id: Ord> MissingEvents<Id> {
+    /// `Err` naming `missing` (sorted, deduplicated), or `Ok` if it is empty.
+    fn check(mut missing: Vec<Id>) -> Result<(), Self> {
+        if missing.is_empty() {
+            return Ok(());
+        }
+        missing.sort();
+        missing.dedup();
+        Err(Self { missing })
+    }
+}
+
+impl<Id: core::fmt::Debug> core::fmt::Display for MissingEvents<Id> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
@@ -34,7 +48,7 @@ impl<Id: core::fmt::Debug> core::fmt::Display for MissingAuthEvents<Id> {
     }
 }
 
-impl<Id: core::fmt::Debug> core::error::Error for MissingAuthEvents<Id> {}
+impl<Id: core::fmt::Debug> core::error::Error for MissingEvents<Id> {}
 
 /// A topologically-ordered auth DAG with pre-computed transitive reachability bitmaps.
 ///
@@ -121,6 +135,33 @@ where
         }
     }
 
+    /// [`Self::build`], but refuses an event set that is not auth-closed.
+    ///
+    /// `build` skips auth events missing from `sort_context`, so their
+    /// descendants' bitmaps silently lack them. This returns every such auth
+    /// event instead, so a caller cannot build a graph whose diffs would be
+    /// incomplete.
+    ///
+    /// # Errors
+    /// Returns [`MissingEvents`] listing auth events cited in `sort_context`
+    /// but not present in it.
+    ///
+    /// # Panics
+    /// As [`Self::build`].
+    pub fn try_build<C: Clone, S: core::hash::BuildHasher>(
+        sort_context: &HashMap<Id, LeanEvent<Id, C>, S>,
+    ) -> Result<Self, MissingEvents<Id>> {
+        MissingEvents::check(
+            sort_context
+                .values()
+                .flat_map(|ev| &ev.auth_events)
+                .filter(|id| !sort_context.contains_key(*id))
+                .cloned()
+                .collect(),
+        )?;
+        Ok(Self::build(sort_context))
+    }
+
     /// Compute the **auth chain difference**:
     /// events in the auth chains of `conflicted_ids`
     /// that are NOT in the auth chains of
@@ -184,25 +225,24 @@ where
     /// Returns `Ok(false)` if the event was already present.
     ///
     /// # Errors
-    /// Returns [`MissingAuthEvents`] listing the auth events not yet in the
+    /// Returns [`MissingEvents`] listing the auth events not yet in the
     /// graph.
     ///
     /// # Panics
     /// Panics if the graph already holds as many events as a `u32` index can
     /// address, as [`Self::build`] does.
-    pub fn insert<C>(&mut self, event: &LeanEvent<Id, C>) -> Result<bool, MissingAuthEvents<Id>> {
+    pub fn insert<C>(&mut self, event: &LeanEvent<Id, C>) -> Result<bool, MissingEvents<Id>> {
         if self.index.index_of(&event.event_id).is_some() {
             return Ok(false);
         }
-        let missing: Vec<Id> = event
-            .auth_events
-            .iter()
-            .filter(|id| self.index.index_of(id).is_none())
-            .cloned()
-            .collect();
-        if !missing.is_empty() {
-            return Err(MissingAuthEvents { missing });
-        }
+        MissingEvents::check(
+            event
+                .auth_events
+                .iter()
+                .filter(|id| self.index.index_of(id).is_none())
+                .cloned()
+                .collect(),
+        )?;
         let mut bitmap = Bitmap::new();
         for auth_id in &event.auth_events {
             if let Some(p_idx) = self.index.index_of(auth_id) {
@@ -226,7 +266,8 @@ where
     /// map's chain reaches even when no unconflicted event cites it. Pass the
     /// result as the precomputed diff of
     /// [`resolve_state_maps_lazy_with_diff`](crate::resolve::multi::resolve_state_maps_lazy_with_diff).
-    /// Events not in the graph are skipped.
+    /// Events not in the graph are skipped; use
+    /// [`Self::try_state_auth_difference`] to refuse them instead.
     ///
     /// # Panics
     /// Panics only if an index in the result is out of this graph's own range,
@@ -264,6 +305,27 @@ where
                     .expect("diff index came from this graph's index")
             })
             .collect()
+    }
+
+    /// [`Self::state_auth_difference`], but refuses state events missing from
+    /// the graph instead of skipping them, which would leave their chains out
+    /// of the difference.
+    ///
+    /// # Errors
+    /// Returns [`MissingEvents`] listing state event IDs not in the graph.
+    pub fn try_state_auth_difference<K: Ord + Clone>(
+        &self,
+        state_maps: &[crate::state::at::SharedState<Id, K>],
+    ) -> Result<Vec<Id>, MissingEvents<Id>> {
+        MissingEvents::check(
+            state_maps
+                .iter()
+                .flat_map(crate::state::persistent_ord_map::PersistentOrdMap::values)
+                .filter(|id| self.index.index_of(id).is_none())
+                .cloned()
+                .collect(),
+        )?;
+        Ok(self.state_auth_difference(state_maps))
     }
 
     /// Check whether `ancestor` is in the transitive

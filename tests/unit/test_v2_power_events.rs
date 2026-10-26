@@ -503,3 +503,32 @@ fn test_auth_graph_insert_refuses_missing_auth_events() {
         "a refused insert leaves the graph unchanged"
     );
 }
+
+/// A graph built from an event set that is not auth-closed is refused, naming
+/// the missing auth events; the lenient `build` would skip them silently.
+#[test]
+fn test_auth_graph_try_build_refuses_missing_auth_events() {
+    let mut map = room_with_chain(true);
+    map.remove("$pl");
+    let err = rezzy::auth::roaring::AuthGraph::try_build(&map)
+        .err()
+        .expect("$pl is cited but absent");
+    assert_eq!(err.missing, ["$pl"]);
+    assert!(rezzy::auth::roaring::AuthGraph::try_build(&room_with_chain(true)).is_ok());
+}
+
+/// A state event missing from the graph is refused rather than leaving its
+/// chain out of the difference.
+#[test]
+fn test_auth_graph_try_state_difference_refuses_unknown_state_events() {
+    let map = room_with_chain(true);
+    let graph = rezzy::auth::roaring::AuthGraph::try_build(&map).unwrap();
+    let mut forks = fork_states();
+    forks[1].insert(bob_key(), "$not_in_graph".to_string());
+    let err = graph.try_state_auth_difference(&forks).unwrap_err();
+    assert_eq!(err.missing, ["$not_in_graph"]);
+    assert_eq!(
+        graph.try_state_auth_difference(&fork_states()).unwrap(),
+        graph.state_auth_difference(&fork_states())
+    );
+}
