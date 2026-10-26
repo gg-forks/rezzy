@@ -381,16 +381,24 @@ fn test_v2_lazy_shared_auth_ancestor_is_not_in_auth_difference() {
 /// Only Bob's room name cites `$pl_diff`, which lowers `state_default` to 0, so
 /// `$pl_diff` is in the auth difference. Applied, it authorizes Bob's name,
 /// whose mainline position is then later than Alice's, so Bob's name wins.
-#[test]
-fn test_v2_auth_difference_power_event_authorizes_conflicted_event() {
-    let mut events = utils::parse_jsonl_events(ROOM);
-    events.extend(utils::parse_jsonl_events(
-        r#"
+const AUTH_DIFF_POWER_EVENT_BRANCH: &str = r#"
 {"event_id":"$pl_diff","type":"m.room.power_levels","state_key":"","sender":"@alice:a.com","depth":5,"origin_server_ts":1500,"content":{"users":{"@alice:a.com":100},"events_default":0,"state_default":0,"ban":50,"kick":50,"invite":0},"prev_events":["$bob_join"],"auth_events":["$create","$alice_join","$pl"]}
 {"event_id":"$name_alice","type":"m.room.name","state_key":"","sender":"@alice:a.com","depth":5,"origin_server_ts":1600,"content":{"name":"alice"},"prev_events":["$bob_join"],"auth_events":["$create","$alice_join","$pl"]}
 {"event_id":"$name_bob","type":"m.room.name","state_key":"","sender":"@bob:b.com","depth":6,"origin_server_ts":1700,"content":{"name":"bob"},"prev_events":["$pl_diff"],"auth_events":["$create","$bob_join","$pl_diff"]}
-"#,
-    ));
+"#;
+
+type StateMap = PersistentOrdMap<(EventType, String), String>;
+
+struct AuthDiffPowerEventScenario {
+    events: HashMap<String, LeanEvent>,
+    states: Vec<StateMap>,
+    name_key: (EventType, String),
+    power_levels_key: (EventType, String),
+}
+
+fn auth_diff_power_event_scenario(room: &str) -> AuthDiffPowerEventScenario {
+    let mut events = utils::parse_jsonl_events(room);
+    events.extend(utils::parse_jsonl_events(AUTH_DIFF_POWER_EVENT_BRANCH));
     let events = to_event_map(&events);
 
     let mut states = fork_states();
@@ -400,30 +408,46 @@ fn test_v2_auth_difference_power_event_authorizes_conflicted_event() {
     let name_key = (EventType::from("m.room.name"), String::new());
     states[0].insert(name_key.clone(), "$name_alice".to_string());
     states[1].insert(name_key.clone(), "$name_bob".to_string());
-
     let pl_key = (EventType::from("m.room.power_levels"), String::new());
-    for (path, resolved) in [
+
+    AuthDiffPowerEventScenario {
+        events,
+        states,
+        name_key,
+        power_levels_key: pl_key,
+    }
+}
+
+fn resolve_concrete_and_lazy(
+    states: &[StateMap],
+    events: &HashMap<String, LeanEvent>,
+    version: StateResVersion,
+) -> [(&'static str, StateMap); 2] {
+    [
         (
             "concrete",
-            rezzy::resolve_state_maps(&states, &events, StateResVersion::V2),
+            rezzy::resolve_state_maps(states, events, version),
         ),
         (
             "lazy",
-            resolve_state_maps_lazy_with_diff(
-                &states,
-                &events,
-                None::<Vec<String>>,
-                StateResVersion::V2,
-            ),
+            resolve_state_maps_lazy_with_diff(states, events, None::<Vec<String>>, version),
         ),
-    ] {
+    ]
+}
+
+#[test]
+fn test_v2_auth_difference_power_event_authorizes_conflicted_event() {
+    let scenario = auth_diff_power_event_scenario(ROOM);
+    for (path, resolved) in
+        resolve_concrete_and_lazy(&scenario.states, &scenario.events, StateResVersion::V2)
+    {
         assert_eq!(
-            resolved.get(&name_key).map(String::as_str),
+            resolved.get(&scenario.name_key).map(String::as_str),
             Some("$name_bob"),
             "{path}"
         );
         assert_eq!(
-            resolved.get(&pl_key).map(String::as_str),
+            resolved.get(&scenario.power_levels_key).map(String::as_str),
             Some("$pl"),
             "{path}"
         );
@@ -436,48 +460,18 @@ fn test_v2_auth_difference_power_event_authorizes_conflicted_event() {
 /// lacks authorization and Alice's name wins.
 #[test]
 fn test_v1_does_not_include_auth_difference_events() {
-    let mut events = utils::parse_jsonl_events(ROOM);
-    events.extend(utils::parse_jsonl_events(
-        r#"
-{"event_id":"$pl_diff","type":"m.room.power_levels","state_key":"","sender":"@alice:a.com","depth":5,"origin_server_ts":1500,"content":{"users":{"@alice:a.com":100},"events_default":0,"state_default":0,"ban":50,"kick":50,"invite":0},"prev_events":["$bob_join"],"auth_events":["$create","$alice_join","$pl"]}
-{"event_id":"$name_alice","type":"m.room.name","state_key":"","sender":"@alice:a.com","depth":5,"origin_server_ts":1600,"content":{"name":"alice"},"prev_events":["$bob_join"],"auth_events":["$create","$alice_join","$pl"]}
-{"event_id":"$name_bob","type":"m.room.name","state_key":"","sender":"@bob:b.com","depth":6,"origin_server_ts":1700,"content":{"name":"bob"},"prev_events":["$pl_diff"],"auth_events":["$create","$bob_join","$pl_diff"]}
-"#,
-    ));
-    let events = to_event_map(&events);
-
-    let mut states = fork_states();
-    for state in &mut states {
-        state.insert(bob_key(), "$bob_join".to_string());
-    }
-    let name_key = (EventType::from("m.room.name"), String::new());
-    states[0].insert(name_key.clone(), "$name_alice".to_string());
-    states[1].insert(name_key.clone(), "$name_bob".to_string());
-
-    let pl_key = (EventType::from("m.room.power_levels"), String::new());
-    for (path, resolved) in [
-        (
-            "concrete",
-            rezzy::resolve_state_maps(&states, &events, StateResVersion::V1),
-        ),
-        (
-            "lazy",
-            resolve_state_maps_lazy_with_diff(
-                &states,
-                &events,
-                None::<Vec<String>>,
-                StateResVersion::V1,
-            ),
-        ),
-    ] {
+    let scenario = auth_diff_power_event_scenario(ROOM);
+    for (path, resolved) in
+        resolve_concrete_and_lazy(&scenario.states, &scenario.events, StateResVersion::V1)
+    {
         // Alice has PL 100 in unconflicted $pl; Bob lacks power because $pl_diff is not in V1
         assert_eq!(
-            resolved.get(&name_key).map(String::as_str),
+            resolved.get(&scenario.name_key).map(String::as_str),
             Some("$name_alice"),
             "{path}"
         );
         assert_eq!(
-            resolved.get(&pl_key).map(String::as_str),
+            resolved.get(&scenario.power_levels_key).map(String::as_str),
             Some("$pl"),
             "{path}"
         );
@@ -486,7 +480,7 @@ fn test_v1_does_not_include_auth_difference_events() {
     // Also verify compute_state_at (src/state/at.rs) gates out auth difference for V1.
     // In events_with_merge, Bob's name only cites $pl_diff in auth_events (not prev_events),
     // so both parents agree on $pl in their state, and $pl_diff is purely an auth-difference event.
-    let mut events_with_merge = events.clone();
+    let mut events_with_merge = scenario.events.clone();
     if let Some(bob_name) = events_with_merge.get_mut("$name_bob") {
         bob_name.prev_events = vec!["$bob_join".to_string()];
     }
@@ -505,12 +499,14 @@ fn test_v1_does_not_include_auth_difference_events() {
     )
     .expect("merge state must resolve");
     assert_eq!(
-        state_at_merge.get(&name_key).map(String::as_str),
+        state_at_merge.get(&scenario.name_key).map(String::as_str),
         Some("$name_alice"),
         "compute_state_at under V1"
     );
     assert_eq!(
-        state_at_merge.get(&pl_key).map(String::as_str),
+        state_at_merge
+            .get(&scenario.power_levels_key)
+            .map(String::as_str),
         Some("$pl"),
         "compute_state_at under V1"
     );
@@ -540,43 +536,18 @@ const ROOM_V12: &str = r#"
 #[test]
 #[ignore = "known MSC4297/V2.1 issue: auth-diff power event authorization requires final-merge update"]
 fn test_v2_1_auth_difference_power_event_authorizes_conflicted_event() {
-    let mut events = utils::parse_jsonl_events(ROOM_V12);
-    events.extend(utils::parse_jsonl_events(
-        r#"
-{"event_id":"$pl_diff","type":"m.room.power_levels","state_key":"","sender":"@alice:a.com","depth":5,"origin_server_ts":1500,"content":{"users":{"@alice:a.com":100},"events_default":0,"state_default":0,"ban":50,"kick":50,"invite":0},"prev_events":["$bob_join"],"auth_events":["$create","$alice_join","$pl"]}
-{"event_id":"$name_alice","type":"m.room.name","state_key":"","sender":"@alice:a.com","depth":5,"origin_server_ts":1600,"content":{"name":"alice"},"prev_events":["$bob_join"],"auth_events":["$create","$alice_join","$pl"]}
-{"event_id":"$name_bob","type":"m.room.name","state_key":"","sender":"@bob:b.com","depth":6,"origin_server_ts":1700,"content":{"name":"bob"},"prev_events":["$pl_diff"],"auth_events":["$create","$bob_join","$pl_diff"]}
-"#,
-    ));
-    let events = to_event_map(&events);
-
-    let mut states = fork_states();
-    for state in &mut states {
-        state.insert(bob_key(), "$bob_join".to_string());
-    }
-    let name_key = (EventType::from("m.room.name"), String::new());
-    states[0].insert(name_key.clone(), "$name_alice".to_string());
-    states[1].insert(name_key.clone(), "$name_bob".to_string());
-
-    let pl_key = (EventType::from("m.room.power_levels"), String::new());
+    let scenario = auth_diff_power_event_scenario(ROOM_V12);
     for version in [StateResVersion::V2_1, StateResVersion::V2_1_1] {
-        for (path, resolved) in [
-            (
-                "concrete",
-                rezzy::resolve_state_maps(&states, &events, version),
-            ),
-            (
-                "lazy",
-                resolve_state_maps_lazy_with_diff(&states, &events, None::<Vec<String>>, version),
-            ),
-        ] {
+        for (path, resolved) in
+            resolve_concrete_and_lazy(&scenario.states, &scenario.events, version)
+        {
             assert_eq!(
-                resolved.get(&name_key).map(String::as_str),
+                resolved.get(&scenario.name_key).map(String::as_str),
                 Some("$name_bob"),
                 "{version:?} {path}"
             );
             assert_eq!(
-                resolved.get(&pl_key).map(String::as_str),
+                resolved.get(&scenario.power_levels_key).map(String::as_str),
                 Some("$pl"),
                 "{version:?} {path}"
             );
@@ -778,4 +749,44 @@ fn test_hybrid_difference_refuses_incomplete_graph() {
         graph.hybrid_state_auth_difference(&fork_states(), &map),
         Err(rezzy::auth::roaring::AuthDifferenceError::IncompleteGraph)
     );
+}
+
+/// Counts lookups per event ID.
+struct CountingMap<'a> {
+    events: &'a HashMap<String, LeanEvent>,
+    lookups: std::cell::RefCell<HashMap<String, usize>>,
+}
+
+impl rezzy::basespec::rezzy_types::EventProvider<String, rezzy::JsonValue> for CountingMap<'_> {
+    fn get_event(&self, id: &String) -> Option<&LeanEvent> {
+        let mut lookups = self.lookups.borrow_mut();
+        let n = lookups.entry(id.clone()).or_default();
+        *n = n.saturating_add(1);
+        self.events.get(id)
+    }
+}
+
+/// Every fork's walk reaches the absent `$create`, but it is looked up once
+/// and reported once; present events are also fetched once across forks.
+#[test]
+fn test_hybrid_difference_looks_up_each_event_once() {
+    let mut map = room_with_chain(true);
+    map.remove("$create");
+    let provider = CountingMap {
+        events: &map,
+        lookups: std::cell::RefCell::default(),
+    };
+    let graph = graph_of(&map, &[]);
+    let err = graph
+        .hybrid_state_auth_difference(&fork_states(), &provider)
+        .unwrap_err();
+    assert_eq!(
+        err,
+        rezzy::auth::roaring::AuthDifferenceError::Missing(rezzy::auth::roaring::MissingEvents {
+            missing: vec!["$create".to_string()],
+        })
+    );
+    let lookups = provider.lookups.borrow();
+    assert_eq!(lookups["$create"], 1);
+    assert!(lookups.values().all(|&n| n == 1), "{lookups:?}");
 }

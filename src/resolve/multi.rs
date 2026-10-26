@@ -255,13 +255,13 @@ where
         let mut c_heap = alloc::collections::BinaryHeap::new();
         for id in state.values().filter(|id| conflicted.contains(id)) {
             if let Some((_, auth_ids)) = event_auth(id, true) {
-                for auth_id in auth_ids {
-                    if !u_visited.contains(&auth_id) && c_visited.insert(auth_id.clone()) {
-                        if let Some((depth, _)) = event_auth(&auth_id, false) {
-                            c_heap.push((depth, auth_id));
-                        }
-                    }
-                }
+                enqueue_conflicted_auth_events(
+                    auth_ids,
+                    &u_visited,
+                    &mut c_visited,
+                    &mut c_heap,
+                    &mut event_auth,
+                );
             }
         }
 
@@ -287,13 +287,13 @@ where
             if !u_visited.contains(&c_id) {
                 chain.insert(c_id.clone());
                 if let Some((_, auth_ids)) = event_auth(&c_id, true) {
-                    for auth_id in auth_ids {
-                        if !u_visited.contains(&auth_id) && c_visited.insert(auth_id.clone()) {
-                            if let Some((depth, _)) = event_auth(&auth_id, false) {
-                                c_heap.push((depth, auth_id));
-                            }
-                        }
-                    }
+                    enqueue_conflicted_auth_events(
+                        auth_ids,
+                        &u_visited,
+                        &mut c_visited,
+                        &mut c_heap,
+                        &mut event_auth,
+                    );
                 }
             }
         }
@@ -310,6 +310,25 @@ where
         .collect();
     diff.sort();
     diff
+}
+
+fn enqueue_conflicted_auth_events<Id, F>(
+    auth_ids: Vec<Id>,
+    unconflicted_visited: &FastSet<Id>,
+    conflicted_visited: &mut FastSet<Id>,
+    conflicted_heap: &mut alloc::collections::BinaryHeap<(u64, Id)>,
+    event_auth: &mut F,
+) where
+    Id: EventId,
+    F: FnMut(&Id, bool) -> Option<(u64, Vec<Id>)>,
+{
+    for auth_id in auth_ids {
+        if !unconflicted_visited.contains(&auth_id) && conflicted_visited.insert(auth_id.clone()) {
+            if let Some((depth, _)) = event_auth(&auth_id, false) {
+                conflicted_heap.push((depth, auth_id));
+            }
+        }
+    }
 }
 
 /// Resolves N parent state maps into a single deterministic state map.
