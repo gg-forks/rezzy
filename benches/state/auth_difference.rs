@@ -47,25 +47,26 @@ impl CountingProvider<'_> {
     }
 }
 
-fn event(
-    id: String,
-    event_type: &str,
-    state_key: &str,
-    sender: &str,
+struct EventSpec {
+    event_type: &'static str,
+    state_key: String,
+    sender: String,
     depth: u64,
     origin_server_ts: u64,
     content: JsonValue,
     auth_events: Vec<String>,
-) -> LeanEvent {
+}
+
+fn event(id: String, spec: EventSpec) -> LeanEvent {
     LeanEvent {
         event_id: id,
-        event_type: event_type.to_string(),
-        state_key: Some(state_key.to_string()),
-        sender: sender.to_string(),
-        content,
-        auth_events,
-        depth,
-        origin_server_ts,
+        event_type: spec.event_type.to_string(),
+        state_key: Some(spec.state_key),
+        sender: spec.sender,
+        content: spec.content,
+        auth_events: spec.auth_events,
+        depth: spec.depth,
+        origin_server_ts: spec.origin_server_ts,
         ..LeanEvent::default()
     }
 }
@@ -89,72 +90,82 @@ pub(crate) fn build_fixture(common_members: usize, auth_chain_len: usize) -> Fix
         create.clone(),
         event(
             create.clone(),
-            "m.room.create",
-            "",
-            alice,
-            0,
-            1_000,
-            rezzy::json!({"creator": alice, "room_version": "11"}),
-            vec![],
+            EventSpec {
+                event_type: "m.room.create",
+                state_key: String::new(),
+                sender: alice.to_string(),
+                depth: 0,
+                origin_server_ts: 1_000,
+                content: rezzy::json!({"creator": alice, "room_version": "11"}),
+                auth_events: vec![],
+            },
         ),
     );
     events.insert(
         alice_join.clone(),
         event(
             alice_join.clone(),
-            "m.room.member",
-            alice,
-            alice,
-            1,
-            1_001,
-            rezzy::json!({"membership": "join"}),
-            vec![create.clone()],
+            EventSpec {
+                event_type: "m.room.member",
+                state_key: alice.to_string(),
+                sender: alice.to_string(),
+                depth: 1,
+                origin_server_ts: 1_001,
+                content: rezzy::json!({"membership": "join"}),
+                auth_events: vec![create.clone()],
+            },
         ),
     );
     events.insert(
         pl.clone(),
         event(
             pl.clone(),
-            "m.room.power_levels",
-            "",
-            alice,
-            2,
-            1_002,
-            rezzy::json!({
-                "users": { "@alice:example.com": 100 },
-                "events_default": 0,
-                "state_default": 0,
-                "ban": 50,
-                "kick": 50,
-                "invite": 0
-            }),
-            vec![create.clone(), alice_join.clone()],
+            EventSpec {
+                event_type: "m.room.power_levels",
+                state_key: String::new(),
+                sender: alice.to_string(),
+                depth: 2,
+                origin_server_ts: 1_002,
+                content: rezzy::json!({
+                    "users": { "@alice:example.com": 100 },
+                    "events_default": 0,
+                    "state_default": 0,
+                    "ban": 50,
+                    "kick": 50,
+                    "invite": 0
+                }),
+                auth_events: vec![create.clone(), alice_join.clone()],
+            },
         ),
     );
     events.insert(
         jr.clone(),
         event(
             jr.clone(),
-            "m.room.join_rules",
-            "",
-            alice,
-            3,
-            1_003,
-            rezzy::json!({"join_rule": "public"}),
-            vec![create.clone(), alice_join.clone(), pl.clone()],
+            EventSpec {
+                event_type: "m.room.join_rules",
+                state_key: String::new(),
+                sender: alice.to_string(),
+                depth: 3,
+                origin_server_ts: 1_003,
+                content: rezzy::json!({"join_rule": "public"}),
+                auth_events: vec![create.clone(), alice_join.clone(), pl.clone()],
+            },
         ),
     );
     events.insert(
         bob_join.clone(),
         event(
             bob_join.clone(),
-            "m.room.member",
-            bob,
-            bob,
-            4,
-            1_004,
-            rezzy::json!({"membership": "join"}),
-            base_auth.clone(),
+            EventSpec {
+                event_type: "m.room.member",
+                state_key: bob.to_string(),
+                sender: bob.to_string(),
+                depth: 4,
+                origin_server_ts: 1_004,
+                content: rezzy::json!({"membership": "join"}),
+                auth_events: base_auth.clone(),
+            },
         ),
     );
 
@@ -179,13 +190,15 @@ pub(crate) fn build_fixture(common_members: usize, auth_chain_len: usize) -> Fix
             id.clone(),
             event(
                 id.clone(),
-                "m.room.member",
-                &user,
-                &user,
-                5,
-                2_000 + index as u64,
-                rezzy::json!({"membership": "join"}),
-                vec![create.clone(), pl.clone(), jr.clone()],
+                EventSpec {
+                    event_type: "m.room.member",
+                    state_key: user.clone(),
+                    sender: user.clone(),
+                    depth: 5,
+                    origin_server_ts: 2_000 + index as u64,
+                    content: rezzy::json!({"membership": "join"}),
+                    auth_events: vec![create.clone(), pl.clone(), jr.clone()],
+                },
             ),
         );
         common.insert(state_key("m.room.member", &user), id);
@@ -201,13 +214,15 @@ pub(crate) fn build_fixture(common_members: usize, auth_chain_len: usize) -> Fix
             auth_events.push(previous.clone());
             let ev = event(
                 id.clone(),
-                "m.room.member",
-                bob,
-                bob,
-                5 + index as u64,
-                3_000 + index as u64,
-                rezzy::json!({"membership": "join", "displayname": format!("{branch}-{index}")}),
-                auth_events,
+                EventSpec {
+                    event_type: "m.room.member",
+                    state_key: bob.to_string(),
+                    sender: bob.to_string(),
+                    depth: 5 + index as u64,
+                    origin_server_ts: 3_000 + index as u64,
+                    content: rezzy::json!({"membership": "join", "displayname": format!("{branch}-{index}")}),
+                    auth_events,
+                },
             );
             events.insert(id.clone(), ev);
             auth_diff.push(id.clone());
@@ -221,13 +236,15 @@ pub(crate) fn build_fixture(common_members: usize, auth_chain_len: usize) -> Fix
             topic_id.clone(),
             event(
                 topic_id.clone(),
-                "m.room.topic",
-                "",
-                alice,
-                6 + auth_chain_len as u64,
-                4_000 + (branch == 'b') as u64,
-                rezzy::json!({"topic": format!("branch {branch}")}),
-                topic_auth,
+                EventSpec {
+                    event_type: "m.room.topic",
+                    state_key: String::new(),
+                    sender: alice.to_string(),
+                    depth: 6 + auth_chain_len as u64,
+                    origin_server_ts: 4_000 + (branch == 'b') as u64,
+                    content: rezzy::json!({"topic": format!("branch {branch}")}),
+                    auth_events: topic_auth,
+                },
             ),
         );
         topic_ids.push(topic_id);
