@@ -1461,14 +1461,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "event_context missing unconflicted state or auth event $create")]
     fn test_resolve_missing_unconflicted_event_panics() {
-        let fork_a = fork(&[
-            ("m.room.create", "", "$create"),
-            ("m.room.member", "@alice:x", "$join_a"),
-        ]);
-        let fork_b = fork(&[
-            ("m.room.create", "", "$create"),
-            ("m.room.member", "@bob:x", "$join_b"),
-        ]);
+        let [fork_a, fork_b] = missing_unconflicted_forks();
 
         let mut events: HashMap<alloc::string::String, LeanEvent> = HashMap::new();
         events.insert("$join_a".into(), join_ev("$join_a", "@alice:x"));
@@ -1633,18 +1626,8 @@ mod tests {
 "#,
         );
 
-        let fork_a = fork(&[
-            ("m.room.create", "", "$create"),
-            ("m.room.member", "@alice:x", "$alice_join"),
-            ("m.room.power_levels", "", "$pl"),
-            ("m.room.topic", "", "$topic_a"),
-        ]);
-        let fork_b = fork(&[
-            ("m.room.create", "", "$create"),
-            ("m.room.member", "@alice:x", "$alice_join"),
-            ("m.room.power_levels", "", "$pl"),
-            ("m.room.topic", "", "$topic_b"),
-        ]);
+        let fork_a = topic_fork("$topic_a");
+        let fork_b = topic_fork("$topic_b");
 
         // None auth diff → exercises BFS slow path with transitive auth walk
         assert_lazy_matches_concrete(
@@ -1745,14 +1728,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "provider missing conflicted event")]
     fn test_resolve_lazy_missing_conflicted_event_panics() {
-        let fork_a = fork(&[
-            ("m.room.create", "", "$create"),
-            ("m.room.member", "@alice:x", "$join_a"),
-        ]);
-        let fork_b = fork(&[
-            ("m.room.create", "", "$create"),
-            ("m.room.member", "@alice:x", "$join_b"),
-        ]);
+        let [fork_a, fork_b] = missing_unconflicted_forks();
 
         // Provider has $create but NOT the conflicted join events
         let events = parse_jsonl_map(
@@ -1761,25 +1737,13 @@ mod tests {
 "#,
         );
 
-        let _ = resolve_state_maps_lazy_with_diff(
-            &[fork_a, fork_b],
-            &events,
-            None::<alloc::vec::Vec<alloc::string::String>>,
-            StateResVersion::V2,
-        );
+        resolve_lazy_with_events(fork_a, fork_b, &events);
     }
 
     #[test]
     #[should_panic(expected = "provider missing unconflicted state or auth event $create")]
     fn test_resolve_lazy_missing_unconflicted_event_panics() {
-        let fork_a = fork(&[
-            ("m.room.create", "", "$create"),
-            ("m.room.member", "@alice:x", "$join_a"),
-        ]);
-        let fork_b = fork(&[
-            ("m.room.create", "", "$create"),
-            ("m.room.member", "@bob:x", "$join_b"),
-        ]);
+        let [fork_a, fork_b] = missing_unconflicted_forks();
 
         let events = parse_jsonl_map(
             r#"
@@ -1788,12 +1752,7 @@ mod tests {
 "#,
         );
 
-        let _ = resolve_state_maps_lazy_with_diff(
-            &[fork_a, fork_b],
-            &events,
-            None::<alloc::vec::Vec<alloc::string::String>>,
-            StateResVersion::V2,
-        );
+        resolve_lazy_with_events(fork_a, fork_b, &events);
     }
 
     #[test]
