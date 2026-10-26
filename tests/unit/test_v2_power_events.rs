@@ -482,6 +482,38 @@ fn test_v1_does_not_include_auth_difference_events() {
             "{path}"
         );
     }
+
+    // Also verify compute_state_at (src/state/at.rs) gates out auth difference for V1.
+    // In events_with_merge, Bob's name only cites $pl_diff in auth_events (not prev_events),
+    // so both parents agree on $pl in their state, and $pl_diff is purely an auth-difference event.
+    let mut events_with_merge = events.clone();
+    if let Some(bob_name) = events_with_merge.get_mut("$name_bob") {
+        bob_name.prev_events = vec!["$bob_join".to_string()];
+    }
+    events_with_merge.insert(
+        "$merge".to_string(),
+        utils::parse_jsonl_events(
+            r#"{"event_id":"$merge","type":"m.room.message","sender":"@alice:a.com","depth":7,"origin_server_ts":1800,"prev_events":["$name_alice","$name_bob"],"auth_events":["$create","$alice_join"]}"#,
+        )
+        .remove(0),
+    );
+    let state_at_merge = rezzy::compute_state_at(
+        "$merge",
+        &events_with_merge,
+        StateResVersion::V1,
+        &String::new(),
+    )
+    .expect("merge state must resolve");
+    assert_eq!(
+        state_at_merge.get(&name_key).map(String::as_str),
+        Some("$name_alice"),
+        "compute_state_at under V1"
+    );
+    assert_eq!(
+        state_at_merge.get(&pl_key).map(String::as_str),
+        Some("$pl"),
+        "compute_state_at under V1"
+    );
 }
 
 const ROOM_V12: &str = r#"
@@ -492,7 +524,7 @@ const ROOM_V12: &str = r#"
 {"event_id":"$bob_join","type":"m.room.member","state_key":"@bob:b.com","sender":"@bob:b.com","depth":4,"origin_server_ts":1010,"content":{"membership":"join"},"prev_events":["$jr"],"auth_events":["$create","$pl","$jr"]}
 "#;
 
-/// In Room v12 / MSC4297 (StateResVersion::V2_1 and V2_1_1), Synapse applies
+/// In Room v12 / MSC4297 (`StateResVersion::V2_1` and `StateResVersion::V2_1_1`), Synapse applies
 /// auth-difference power events during `_iterative_auth_checks`, and restores
 /// the unconflicted state map at the end (via ChainMap(unconflicted, resolved)).
 ///
@@ -529,15 +561,13 @@ fn test_v2_1_auth_difference_power_event_authorizes_conflicted_event() {
     let pl_key = (EventType::from("m.room.power_levels"), String::new());
     for version in [StateResVersion::V2_1, StateResVersion::V2_1_1] {
         for (path, resolved) in [
-            ("concrete", rezzy::resolve_state_maps(&states, &events, version)),
+            (
+                "concrete",
+                rezzy::resolve_state_maps(&states, &events, version),
+            ),
             (
                 "lazy",
-                resolve_state_maps_lazy_with_diff(
-                    &states,
-                    &events,
-                    None::<Vec<String>>,
-                    version,
-                ),
+                resolve_state_maps_lazy_with_diff(&states, &events, None::<Vec<String>>, version),
             ),
         ] {
             assert_eq!(

@@ -166,7 +166,7 @@ fn test_lattice_fold_resolves_conflicting_topics() {
     assert_topic_b(&resolved, "Lattice fold should pick topic_b (later ts)");
 }
 
-fn test_supplemental_key_does_not_overwrite_resolved_state(version: StateResVersion) {
+fn test_supplemental_key_resolution_by_version(version: StateResVersion) {
     let events = utils::parse_jsonl_events(FIXTURE);
     let map = to_event_map(&events);
     let unconflicted = utils::build_unconflicted_state_test_helper(&map);
@@ -214,7 +214,7 @@ fn test_supplemental_key_does_not_overwrite_resolved_state(version: StateResVers
     );
 }
 
-cases!(test_supplemental_key_does_not_overwrite_resolved_state:
+cases!(test_supplemental_key_resolution_by_version:
     v2 = StateResVersion::V2,
     v2_1 = StateResVersion::V2_1,
     v2_1_1 = StateResVersion::V2_1_1,

@@ -1048,11 +1048,7 @@ where
     //   and federation convergence requires matching other MSC4297
     //   implementations here. So `resolved` must win.
 
-    merge_final_resolved(
-        version,
-        unconflicted_state.clone(),
-        resolved,
-    )
+    merge_final_resolved(version, unconflicted_state.clone(), resolved)
 }
 
 /// Whether an accepted event may update `key` in the partially resolved state.
@@ -1338,11 +1334,7 @@ where
     // Same version-gated fix as resolve_iterative_sort_with_all_caches: see
     // the comment there for why V1/V2 and V2.1+ need opposite merge
     // directions for this final step.
-    let final_resolved = merge_final_resolved(
-        version,
-        unconflicted_state.clone(),
-        resolved,
-    );
+    let final_resolved = merge_final_resolved(version, unconflicted_state.clone(), resolved);
     (final_resolved, deltas)
 }
 
