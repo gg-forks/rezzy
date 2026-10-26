@@ -3788,6 +3788,25 @@ mod tests {
         assert!(state.contains_key(&("m.room.create".into(), String::new())));
     }
 
+    fn shared_parent_states(
+        ids: &[&str],
+        events: &HashMap<String, LeanEvent>,
+    ) -> alloc::vec::Vec<SharedState> {
+        ids.iter()
+            .map(|id| {
+                compute_state_at(
+                    &(*id).to_string(),
+                    events,
+                    StateResVersion::V2,
+                    &String::new(),
+                )
+                .expect("parent state resolves")
+                .into_iter()
+                .collect::<SharedState>()
+            })
+            .collect()
+    }
+
     #[test]
     fn test_compute_state_at_shared_auth_ancestor_matches_merge_resolver() {
         let a = LeanEvent {
@@ -3820,20 +3839,7 @@ mod tests {
             &String::new(),
         )
         .expect("target state resolves");
-        let parents = ["left", "right"]
-            .iter()
-            .map(|id| {
-                compute_state_at(
-                    &(*id).to_string(),
-                    &events,
-                    StateResVersion::V2,
-                    &String::new(),
-                )
-                .expect("parent state resolves")
-                .into_iter()
-                .collect::<SharedState>()
-            })
-            .collect::<Vec<_>>();
+        let parents = shared_parent_states(&["left", "right"], &events);
         let mut caches = LocalAuthCache::new(StateResVersion::V2);
         let mut mainline = FastMap::default();
         let expected = resolve_merged_parent_states(
@@ -3880,18 +3886,7 @@ mod tests {
             ..test_event("target", "m.room.message", "@admin:x")
         };
         let events = test_events_map(vec![a, x, left, right, target]);
-        let parents = ["left", "right"]
-            .iter()
-            .map(|id| {
-                compute_state_at(
-                    &(*id).to_string(),
-                    &events,
-                    StateResVersion::V2,
-                    &String::new(),
-                )
-                .expect("parent state resolves")
-            })
-            .collect::<Vec<_>>();
+        let parents = shared_parent_states(&["left", "right"], &events);
         for parent in &parents {
             assert!(
                 !parent.values().any(|id| id == "X"),
@@ -3905,14 +3900,8 @@ mod tests {
             &String::new(),
         )
         .expect("target state resolves");
-        let expected = crate::resolve::multi::resolve_state_maps(
-            &parents
-                .iter()
-                .map(|p| p.clone().into_iter().collect::<SharedState>())
-                .collect::<Vec<_>>(),
-            &events,
-            StateResVersion::V2,
-        );
+        let expected =
+            crate::resolve::multi::resolve_state_maps(&parents, &events, StateResVersion::V2);
         assert_eq!(state, expected.into_iter().collect());
         assert!(
             !state.values().any(|id| id == "X"),
