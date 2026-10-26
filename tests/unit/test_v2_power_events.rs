@@ -656,3 +656,96 @@ fn test_auth_graph_try_state_difference_refuses_unknown_state_events() {
         graph.state_auth_difference(&fork_states())
     );
 }
+
+// ============================================================================
+// AuthGraph: hybrid (graph + provider walk) auth difference
+// ============================================================================
+
+const BASE: [&str; 5] = ["$create", "$alice_join", "$pl", "$jr", "$bob_join"];
+
+/// A complete graph over just `ids` (which must be auth-closed).
+fn graph_of(map: &HashMap<String, LeanEvent>, ids: &[&str]) -> rezzy::auth::roaring::AuthGraph {
+    let subset: HashMap<String, LeanEvent> = ids
+        .iter()
+        .map(|id| ((*id).to_string(), map[*id].clone()))
+        .collect();
+    rezzy::auth::roaring::AuthGraph::try_build(&subset).expect("subset is auth-closed")
+}
+
+fn sorted(mut ids: Vec<String>) -> Vec<String> {
+    ids.sort();
+    ids
+}
+
+/// Indexed-only, walk-only and mixed graphs all give the full graph's diff.
+#[test]
+fn test_hybrid_difference_matches_full_graph() {
+    for (name, map, forks) in [
+        ("tied chain", room_with_chain(true), fork_states()),
+        (
+            "shared ancestor",
+            shared_ancestor_room(),
+            shared_ancestor_forks(),
+        ),
+    ] {
+        let full = rezzy::auth::roaring::AuthGraph::try_build(&map).unwrap();
+        let expected = sorted(full.state_auth_difference(&forks));
+        let empty = graph_of(&map, &[]);
+        let base = graph_of(&map, &BASE);
+        for (graph_name, graph) in [
+            ("indexed-only", &full),
+            ("walk-only", &empty),
+            ("mixed", &base),
+        ] {
+            assert_eq!(
+                graph.hybrid_state_auth_difference(&forks, &map).unwrap(),
+                expected,
+                "{name}, {graph_name}"
+            );
+        }
+    }
+}
+
+/// An unindexed ancestor reached by every fork's walk is in the intersection.
+#[test]
+fn test_hybrid_difference_excludes_shared_unindexed_ancestor() {
+    let map = shared_ancestor_room();
+    let diff = graph_of(&map, &BASE)
+        .hybrid_state_auth_difference(&shared_ancestor_forks(), &map)
+        .unwrap();
+    assert!(!diff.contains(&"$x".to_string()), "{diff:?}");
+}
+
+#[test]
+fn test_hybrid_difference_reports_missing_auth_event() {
+    let mut map = room_with_chain(true);
+    let graph = graph_of(&map, &BASE);
+    map.remove("$m_c");
+    let err = graph
+        .hybrid_state_auth_difference(&fork_states(), &map)
+        .unwrap_err();
+    assert_eq!(
+        err,
+        rezzy::auth::roaring::AuthDifferenceError::Missing(rezzy::auth::roaring::MissingEvents {
+            missing: vec!["$m_c".to_string()],
+        })
+    );
+}
+
+/// A lenient build that skipped an auth event is refused: the walk could not
+/// tell that an indexed bitmap lacks an ancestor.
+#[test]
+fn test_hybrid_difference_refuses_incomplete_graph() {
+    let map = room_with_chain(true);
+    let mut partial = map.clone();
+    partial.remove("$pl");
+    let graph = rezzy::auth::roaring::AuthGraph::build(&partial);
+    assert!(!graph.is_complete());
+    assert!(rezzy::auth::roaring::AuthGraph::try_build(&map)
+        .unwrap()
+        .is_complete());
+    assert_eq!(
+        graph.hybrid_state_auth_difference(&fork_states(), &map),
+        Err(rezzy::auth::roaring::AuthDifferenceError::IncompleteGraph)
+    );
+}
