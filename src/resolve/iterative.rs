@@ -307,14 +307,8 @@ pub(crate) fn run_power_phase_iterative_checks<Id, C, S2, S3, S4, Spl, K>(
                 continue;
             };
             let key = (EventType::from(event.event_type.as_str()), sk.clone());
-            // Only a genuinely conflicted key may be decided by the
-            // power phase. `power_events` can also contain events
-            // pulled in purely as auth-chain context (the
-            // `auth(C) \ auth(U)` supplement, or the MSC4297
-            // conflicted subgraph) — those exist so *other*, actually
-            // conflicting events' auth chains can be validated, not
-            // so their own (possibly stale, superseded) key can win
-            // over a value every merge parent already agreed on.
+            // V2/V2.1 auth-difference events may update working state during
+            // checks; their final merge restores unconflicted values.
             if !decides_key(version, conflicted_keys, &key) {
                 continue;
             }
@@ -1017,8 +1011,8 @@ where
         ) {
             if let Some(sk) = &ev.state_key {
                 let key = (EventType::from(ev.event_type.as_str()), sk.clone());
-                // Same guard as the power phase: only a genuinely conflicted
-                // key may be decided here.
+                // V2/V2.1 auth-difference events may update working state
+                // during checks; their final merge restores unconflicted values.
                 if decides_key(version, caches.conflicted_keys, &key) {
                     resolved.insert(key, ev.event_id.clone());
                 }
@@ -1026,54 +1020,27 @@ where
         }
     }
 
-    // Final step (Matrix v2 spec): "Update the result of step 5 with the
-    // unconflicted state." The correct merge direction depends on what
-    // `resolved` already contains, which differs by version:
-    //
-    // - V1/V2: `get_initial_resolved_state` seeds `resolved` as a *clone* of
-    //   `unconflicted_state`, so every unconflicted value is already present.
-    //   Applying unconflicted last is then a no-op for every legitimately
-    //   resolved key, and only matters where an auth-diff-supplied power
-    //   event (pulled into `conflicted_events` purely to supply auth context
-    //   for a genuinely conflicting *other* key) incorrectly overwrote a key
-    //   that was never actually in conflict — which it must not be allowed
-    //   to do. So unconflicted must win here.
-    // - V2.1+: `resolved` starts *empty*, and `merge_unconflicted_power_events`
-    //   deliberately re-admits only power_levels/join_rules/create (via
-    //   `or_insert_with`, never overwriting). Other keys — notably
-    //   membership — are intentionally left for the power/non-power phases
-    //   to populate from scratch, which is how MSC4297 ban/kick
-    //   supplementation works: a validly-authorized ban pulled in via the
-    //   auth diff must be able to override a stale "unconflicted" join,
-    //   and federation convergence requires matching other MSC4297
-    //   implementations here. So `resolved` must win.
-
+    // Final step (Matrix v2 / MSC4297): apply unconflicted state after the
+    // iterative result for V1/V2/V2.1. Auth-difference events participate in
+    // authorization, but agreed values take precedence in the final output.
     merge_final_resolved(version, unconflicted_state.clone(), resolved)
 }
 
 /// Whether an accepted event may update `key` in the partially resolved state.
 ///
-/// V2 applies every authorized event of the full conflicted set, the auth
-/// difference included (spec v2; Synapse's `_iterative_auth_checks`), so an
-/// auth-difference power event changes how later events are authorized. The
-/// unconflicted state is restored at the end, so the final value of an agreed
-/// key is unaffected. V1 has no auth difference, and v2.1+ starts from empty
-/// state with no such restore, so both only let genuinely conflicted keys move.
+/// V2 and stock V2.1 apply auth-difference events during iterative
+/// authorization checks. V2.1.1/V2.2 retain rezzy's additional conflicted-key
+/// restriction. V1 has no auth difference.
 pub(crate) fn decides_key<K: Ord + core::hash::Hash>(
     version: StateResVersion,
     conflicted_keys: &crate::FastSet<(EventType, K)>,
     key: &(EventType, K),
 ) -> bool {
-    version == StateResVersion::V2 || conflicted_keys.contains(key)
+    matches!(version, StateResVersion::V2 | StateResVersion::V2_1) || conflicted_keys.contains(key)
 }
 
-/// Performs the version-gated final merge of `resolved` over
-/// `unconflicted_state`.
-///
-/// For V1/V2, `resolved` already contains a clone of `unconflicted_state`, so
-/// the unconflicted values are applied last and win. For V2.1+, `resolved`
-/// starts empty and must win over the unconflicted base (see the longer
-/// comment at the call site).
+/// Merges the iterative result over the unconflicted base. V1/V2/V2.1 restore
+/// unconflicted values; V2.1.1/V2.2 retain rezzy's resolved-wins hardening.
 fn merge_final_resolved<Id, K>(
     version: StateResVersion,
     unconflicted_state: SharedState<Id, K>,
@@ -1083,7 +1050,7 @@ where
     Id: Clone,
     K: Clone + Ord,
 {
-    if version.is_v2_1_plus() {
+    if matches!(version, StateResVersion::V2_1_1 | StateResVersion::V2_2) {
         let mut f = unconflicted_state;
         for (k, v) in resolved {
             f.insert(k, v);

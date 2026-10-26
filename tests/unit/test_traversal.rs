@@ -127,6 +127,22 @@ fn state_map_with_member(member_id: &str) -> rezzy::PersistentOrdMap<(EventType,
     .collect()
 }
 
+/// Drops every key a conflicted event names from `unconflicted`. Partitioning
+/// real forks puts each key in exactly one of the two; a key in both is an
+/// input no state maps produce, and the final step would restore its stale
+/// unconflicted value over the resolved one.
+fn without_conflicted_keys(
+    mut unconflicted: rezzy::PersistentOrdMap<(EventType, String), String>,
+    conflicted: &HashMap<String, LeanEvent>,
+) -> rezzy::PersistentOrdMap<(EventType, String), String> {
+    for ev in conflicted.values() {
+        if let Some(sk) = &ev.state_key {
+            unconflicted.remove(&(EventType::from(ev.event_type.as_str()), sk.clone()));
+        }
+    }
+    unconflicted
+}
+
 fn unconflicted_from_auth(
     auth: &HashMap<String, LeanEvent>,
 ) -> rezzy::PersistentOrdMap<(EventType, String), String> {
@@ -829,7 +845,9 @@ fn bob_ban_concurrent_change_fixture(
         &auth_context,
         &["$create", "$pl", "$join_rules", "$bob_join"],
     );
-    let conflicted_events = events_by_id(vec![alice_bans_bob, change.clone()]);
+    // Bob's membership is the conflict: join on one fork, ban on the other.
+    let conflicted_events = events_by_id(vec![bob_join, alice_bans_bob, change.clone()]);
+    let unconflicted = without_conflicted_keys(unconflicted, &conflicted_events);
     (auth_context, unconflicted, conflicted_events, change)
 }
 
@@ -883,14 +901,15 @@ fn test_v2_1_flaw_concurrent_ban_evasion() {
         rezzy::StateResVersion::V2_1,
     );
 
-    // Alice's ban has PL 100, so Kahn sort evaluates it FIRST. It is added to the resolved state.
+    // The membership key is conflicted, so Alice's ban survives the final
+    // unconflicted-state merge.
     assert_eq!(
         &resolved_v21[&(
             rezzy::basespec::event_types::EventType::from("m.room.member"),
             "@bob:example.com".to_string()
         )],
         "$alice_bans_bob",
-        "Bob should be banned in the final state"
+        "Bob's conflicted membership key resolves to the ban"
     );
 
     // V2.1 now correctly REJECTS Bob's concurrent name change!
@@ -1165,7 +1184,7 @@ fn test_v2_1_spec_compliant_step_4_supplementation() {
             "@bob:example.com".to_string()
         )],
         "$alice_bans_bob",
-        "Bob should be banned in the final resolved state"
+        "Bob's conflicted membership key resolves to the ban"
     );
 
     // Bob's topic change must be REJECTED in Step 4 because Step 4 correctly
@@ -1699,7 +1718,7 @@ fn progressively_banned_sender_scenario(
 
     let auth_context = events_by_id(auth_evs);
     let conflicted = events_by_id(conflicted_evs);
-    let unconflicted = unconflicted_from_auth(&auth_context);
+    let unconflicted = without_conflicted_keys(unconflicted_from_auth(&auth_context), &conflicted);
     resolve(&unconflicted, &conflicted, &auth_context, version)
 }
 
@@ -1740,8 +1759,8 @@ fn test_v2_1_rejects_pl_from_progressively_banned_sender() {
     // Under V2.1 (MSC4297), required auth keys (incl. the sender's member event)
     // come from the resolved state. $mal_ban (ts 500) sorts before $mal_pl (ts
     // 700), so by the time $mal_pl is auth-checked Mallory is resolved as banned
-    // and $mal_pl is rejected — $admin_pl wins. (The prior "stock V2.1 does not
-    // supplement membership" behavior was a non-spec deviation, now removed.)
+    // and $mal_pl is rejected. The power-level key itself is conflicted, so
+    // the authorized admin candidate remains in final state.
     assert_eq!(
         resolved.get(&pl_key),
         Some(&"$admin_pl".to_string()),

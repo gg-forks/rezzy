@@ -777,7 +777,7 @@ mod tests {
                 rezzy::basespec::event_types::EventType::from("m.room.member"),
                 "@bob:example.com".into()
             )),
-            Some(&"id2_new".into()) // id2_new wins because voluntary joins are non-power events sorted chronologically.
+            Some(&"id2".into()) // The agreed unconflicted value is restored by the final merge.
         );
     }
 

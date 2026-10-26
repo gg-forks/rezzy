@@ -524,26 +524,21 @@ const ROOM_V12: &str = r#"
 /// auth-difference power events during `_iterative_auth_checks`, and restores
 /// the unconflicted state map at the end (via ChainMap(unconflicted, resolved)).
 ///
-/// Under rezzy's current V2.1 implementation, `decides_key` restricts updates
-/// to `conflicted_keys` to prevent `merge_final_resolved` from overwriting
-/// unconflicted keys with `resolved`. Because of this restriction, `$pl_diff`
-/// is not applied during iterative checks, so Bob's name is rejected and
-/// Alice's name wins instead.
-///
-/// This test is marked `#[ignore]` until the V2.1 final-merge semantics are
-/// updated to allow auth-difference power events to take part in authorization
-/// while restoring unconflicted keys at the end.
 #[test]
-#[ignore = "known MSC4297/V2.1 issue: auth-diff power event authorization requires final-merge update"]
 fn test_v2_1_auth_difference_power_event_authorizes_conflicted_event() {
     let scenario = auth_diff_power_event_scenario(ROOM_V12);
     for version in [StateResVersion::V2_1, StateResVersion::V2_1_1] {
+        let expected_name = if version == StateResVersion::V2_1 {
+            "$name_bob"
+        } else {
+            "$name_alice"
+        };
         for (path, resolved) in
             resolve_concrete_and_lazy(&scenario.states, &scenario.events, version)
         {
             assert_eq!(
                 resolved.get(&scenario.name_key).map(String::as_str),
-                Some("$name_bob"),
+                Some(expected_name),
                 "{version:?} {path}"
             );
             assert_eq!(
@@ -553,6 +548,40 @@ fn test_v2_1_auth_difference_power_event_authorizes_conflicted_event() {
             );
         }
     }
+
+    // The semilattice entry point delegates V2.1+ to the iterative resolver;
+    // provide the auth-difference event explicitly and verify stock V2.1's
+    // final merge restores the agreed power levels.
+    let mut semilattice_unconflicted = scenario.states[0].clone();
+    semilattice_unconflicted.remove(&scenario.name_key);
+    let semilattice = resolve_semilattice_fold(
+        &semilattice_unconflicted,
+        &HashMap::from([
+            (
+                "$name_alice".to_string(),
+                scenario.events["$name_alice"].clone(),
+            ),
+            (
+                "$name_bob".to_string(),
+                scenario.events["$name_bob"].clone(),
+            ),
+            ("$pl_diff".to_string(), scenario.events["$pl_diff"].clone()),
+        ]),
+        &scenario.events,
+        StateResVersion::V2_1,
+    );
+    assert_eq!(
+        semilattice.get(&scenario.name_key).map(String::as_str),
+        Some("$name_bob"),
+        "semilattice entry point"
+    );
+    assert_eq!(
+        semilattice
+            .get(&scenario.power_levels_key)
+            .map(String::as_str),
+        Some("$pl"),
+        "semilattice entry point restores unconflicted power levels"
+    );
 }
 
 // ============================================================================
