@@ -394,3 +394,31 @@ To measure the fix's performance cost, compare two cases at the same state size
 and edit count: one without leaf/subtree transitions and one that triggers them.
 Build both trees outside the timed loop, verify both deltas against an oracle,
 and confirm the second case exercises the cross-kind path.
+
+## Auth difference: large-room resolution paths (2026-10-25)
+
+Commit `7954d139`. `cargo +1.90.0 bench --manifest-path benches/Cargo.toml
+--bench rezzy -- auth_difference` and `-- auth_difference_mtxdb`; rustc
+1.90.0, Linux 6.18.55-1-lts, Intel i5-8600K. Load average was ~13 during the
+run, so timings are noisy (±20% across runs); lookup and read counts are
+exact. Fixture: 10,000 common members, 64 auth-chain events per branch, 2
+forks; all diff paths return the same 130 events.
+
+| Path | ms/op | Provider lookups / mtxdb reads |
+|---|---:|---:|
+| Concrete, computed diff | 26.7 | n/a |
+| Lazy, computed diff (in-memory provider) | 30.6 | 10,268 |
+| Lazy, fixture's precomputed diff (floor) | 15.5 | 135 |
+| Lazy + rezzy `AuthGraph` diff | 22.3 | 135 |
+| Lazy + hybrid diff, 0% / 10% / 100% unindexed | 21.8 / 20.6 / 34.9 | 135 / 1,149 / 10,270 |
+| Lazy, mtxdb provider, computed diff | 66.4 | 10,135 |
+| Lazy, mtxdb provider + mtxdb closure diff (merged) | 62.5 | 135 |
+| Lazy, mtxdb provider + rezzy `AuthGraph` diff | 25.1 | 135 |
+
+- `AuthGraph`: build 14.9 ms once; insert 0.82 us/event; 245.9 KiB encoded
+  bitmaps (~25 B/event, a lower bound on resident size; shallow chains).
+- mtxdb: write 653 ms, closure rebuild 98 ms, 15.2 MiB on disk; reads ~4-5 us
+  each (warm page cache). Its closure diff (45.7 ms merged) is dominated by
+  ~10k persisted closure reads for the unconflicted state.
+- Takeaway: an in-memory `AuthGraph` beside the event store (mtxdb or other)
+  is the cheap path; reading every unconflicted closure from disk is not.
