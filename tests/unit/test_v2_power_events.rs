@@ -430,6 +430,130 @@ fn test_v2_auth_difference_power_event_authorizes_conflicted_event() {
     }
 }
 
+/// In V1, the auth difference (∪Cᵢ − ∩Cᵢ) is never computed or added to the
+/// conflicted events set. An auth-difference-only event (such as `$pl_diff`
+/// cited only in Bob's auth chain) is excluded from resolution, so Bob's name
+/// lacks authorization and Alice's name wins.
+#[test]
+fn test_v1_does_not_include_auth_difference_events() {
+    let mut events = utils::parse_jsonl_events(ROOM);
+    events.extend(utils::parse_jsonl_events(
+        r#"
+{"event_id":"$pl_diff","type":"m.room.power_levels","state_key":"","sender":"@alice:a.com","depth":5,"origin_server_ts":1500,"content":{"users":{"@alice:a.com":100},"events_default":0,"state_default":0,"ban":50,"kick":50,"invite":0},"prev_events":["$bob_join"],"auth_events":["$create","$alice_join","$pl"]}
+{"event_id":"$name_alice","type":"m.room.name","state_key":"","sender":"@alice:a.com","depth":5,"origin_server_ts":1600,"content":{"name":"alice"},"prev_events":["$bob_join"],"auth_events":["$create","$alice_join","$pl"]}
+{"event_id":"$name_bob","type":"m.room.name","state_key":"","sender":"@bob:b.com","depth":6,"origin_server_ts":1700,"content":{"name":"bob"},"prev_events":["$pl_diff"],"auth_events":["$create","$bob_join","$pl_diff"]}
+"#,
+    ));
+    let events = to_event_map(&events);
+
+    let mut states = fork_states();
+    for state in &mut states {
+        state.insert(bob_key(), "$bob_join".to_string());
+    }
+    let name_key = (EventType::from("m.room.name"), String::new());
+    states[0].insert(name_key.clone(), "$name_alice".to_string());
+    states[1].insert(name_key.clone(), "$name_bob".to_string());
+
+    let pl_key = (EventType::from("m.room.power_levels"), String::new());
+    for (path, resolved) in [
+        (
+            "concrete",
+            rezzy::resolve_state_maps(&states, &events, StateResVersion::V1),
+        ),
+        (
+            "lazy",
+            resolve_state_maps_lazy_with_diff(
+                &states,
+                &events,
+                None::<Vec<String>>,
+                StateResVersion::V1,
+            ),
+        ),
+    ] {
+        // Alice has PL 100 in unconflicted $pl; Bob lacks power because $pl_diff is not in V1
+        assert_eq!(
+            resolved.get(&name_key).map(String::as_str),
+            Some("$name_alice"),
+            "{path}"
+        );
+        assert_eq!(
+            resolved.get(&pl_key).map(String::as_str),
+            Some("$pl"),
+            "{path}"
+        );
+    }
+}
+
+const ROOM_V12: &str = r#"
+{"event_id":"$create","type":"m.room.create","state_key":"","sender":"@alice:a.com","depth":0,"origin_server_ts":1000,"content":{"room_version":"12"},"prev_events":[],"auth_events":[]}
+{"event_id":"$alice_join","type":"m.room.member","state_key":"@alice:a.com","sender":"@alice:a.com","depth":1,"origin_server_ts":1001,"content":{"membership":"join"},"prev_events":["$create"],"auth_events":["$create"]}
+{"event_id":"$pl","type":"m.room.power_levels","state_key":"","sender":"@alice:a.com","depth":2,"origin_server_ts":1002,"content":{"users":{"@alice:a.com":100},"events_default":0,"state_default":50,"ban":50,"kick":50,"invite":0},"prev_events":["$alice_join"],"auth_events":["$create","$alice_join"]}
+{"event_id":"$jr","type":"m.room.join_rules","state_key":"","sender":"@alice:a.com","depth":3,"origin_server_ts":1003,"content":{"join_rule":"public"},"prev_events":["$pl"],"auth_events":["$create","$alice_join","$pl"]}
+{"event_id":"$bob_join","type":"m.room.member","state_key":"@bob:b.com","sender":"@bob:b.com","depth":4,"origin_server_ts":1010,"content":{"membership":"join"},"prev_events":["$jr"],"auth_events":["$create","$pl","$jr"]}
+"#;
+
+/// In Room v12 / MSC4297 (StateResVersion::V2_1 and V2_1_1), Synapse applies
+/// auth-difference power events during `_iterative_auth_checks`, and restores
+/// the unconflicted state map at the end (via ChainMap(unconflicted, resolved)).
+///
+/// Under rezzy's current V2.1 implementation, `decides_key` restricts updates
+/// to `conflicted_keys` to prevent `merge_final_resolved` from overwriting
+/// unconflicted keys with `resolved`. Because of this restriction, `$pl_diff`
+/// is not applied during iterative checks, so Bob's name is rejected and
+/// Alice's name wins instead.
+///
+/// This test is marked `#[ignore]` until the V2.1 final-merge semantics are
+/// updated to allow auth-difference power events to take part in authorization
+/// while restoring unconflicted keys at the end.
+#[test]
+#[ignore = "known MSC4297/V2.1 issue: auth-diff power event authorization requires final-merge update"]
+fn test_v2_1_auth_difference_power_event_authorizes_conflicted_event() {
+    let mut events = utils::parse_jsonl_events(ROOM_V12);
+    events.extend(utils::parse_jsonl_events(
+        r#"
+{"event_id":"$pl_diff","type":"m.room.power_levels","state_key":"","sender":"@alice:a.com","depth":5,"origin_server_ts":1500,"content":{"users":{"@alice:a.com":100},"events_default":0,"state_default":0,"ban":50,"kick":50,"invite":0},"prev_events":["$bob_join"],"auth_events":["$create","$alice_join","$pl"]}
+{"event_id":"$name_alice","type":"m.room.name","state_key":"","sender":"@alice:a.com","depth":5,"origin_server_ts":1600,"content":{"name":"alice"},"prev_events":["$bob_join"],"auth_events":["$create","$alice_join","$pl"]}
+{"event_id":"$name_bob","type":"m.room.name","state_key":"","sender":"@bob:b.com","depth":6,"origin_server_ts":1700,"content":{"name":"bob"},"prev_events":["$pl_diff"],"auth_events":["$create","$bob_join","$pl_diff"]}
+"#,
+    ));
+    let events = to_event_map(&events);
+
+    let mut states = fork_states();
+    for state in &mut states {
+        state.insert(bob_key(), "$bob_join".to_string());
+    }
+    let name_key = (EventType::from("m.room.name"), String::new());
+    states[0].insert(name_key.clone(), "$name_alice".to_string());
+    states[1].insert(name_key.clone(), "$name_bob".to_string());
+
+    let pl_key = (EventType::from("m.room.power_levels"), String::new());
+    for version in [StateResVersion::V2_1, StateResVersion::V2_1_1] {
+        for (path, resolved) in [
+            ("concrete", rezzy::resolve_state_maps(&states, &events, version)),
+            (
+                "lazy",
+                resolve_state_maps_lazy_with_diff(
+                    &states,
+                    &events,
+                    None::<Vec<String>>,
+                    version,
+                ),
+            ),
+        ] {
+            assert_eq!(
+                resolved.get(&name_key).map(String::as_str),
+                Some("$name_bob"),
+                "{version:?} {path}"
+            );
+            assert_eq!(
+                resolved.get(&pl_key).map(String::as_str),
+                Some("$pl"),
+                "{version:?} {path}"
+            );
+        }
+    }
+}
+
 // ============================================================================
 // AuthGraph: bitmap auth difference
 // ============================================================================

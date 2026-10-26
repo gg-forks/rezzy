@@ -519,25 +519,27 @@ where
 
     // The auth difference is part of the full conflicted set, so its events
     // are sorted and re-applied like the conflicted state, not only used as
-    // auth context.
-    let auth_diff = auth_difference(
-        &unconflicted_state,
-        state_maps,
-        &conflicted_ids,
-        |id, with_auth| {
-            event_context.get(id).map(|ev| {
-                let auth = if with_auth {
-                    ev.auth_events.clone()
-                } else {
-                    Vec::new()
-                };
-                (ev.depth, auth)
-            })
-        },
-    );
-    for id in auth_diff {
-        if let Some(ev) = event_context.get(&id) {
-            conflicted_events.entry(id).or_insert_with(|| ev.clone());
+    // auth context. V1 does not compute or resolve an auth difference.
+    if version != StateResVersion::V1 {
+        let auth_diff = auth_difference(
+            &unconflicted_state,
+            state_maps,
+            &conflicted_ids,
+            |id, with_auth| {
+                event_context.get(id).map(|ev| {
+                    let auth = if with_auth {
+                        ev.auth_events.clone()
+                    } else {
+                        Vec::new()
+                    };
+                    (ev.depth, auth)
+                })
+            },
+        );
+        for id in auth_diff {
+            if let Some(ev) = event_context.get(&id) {
+                conflicted_events.entry(id).or_insert_with(|| ev.clone());
+            }
         }
     }
 
@@ -863,18 +865,23 @@ where
     let mut auth_context: HashMap<Id, LeanEvent<Id, C>> = HashMap::new();
 
     // The auth difference is part of the full conflicted set: its events are
-    // sorted and re-applied below, not only used as auth context.
-    let precomputed = precomputed_auth_diff.is_some();
+    // sorted and re-applied below, not only used as auth context. V1 does not
+    // compute or resolve an auth difference.
+    let precomputed = precomputed_auth_diff.is_some() && version != StateResVersion::V1;
     let mut fetched_events = conflicted_events.clone();
-    let auth_diff: Vec<Id> = match precomputed_auth_diff {
-        Some(auth_diff) => auth_diff.into_iter().collect(),
-        None => lazy_auth_difference(
-            &unconflicted_state,
-            state_maps,
-            &conflicted_ids,
-            provider,
-            &fetched_events,
-        ),
+    let auth_diff: Vec<Id> = if version == StateResVersion::V1 {
+        Vec::new()
+    } else {
+        match precomputed_auth_diff {
+            Some(auth_diff) => auth_diff.into_iter().collect(),
+            None => lazy_auth_difference(
+                &unconflicted_state,
+                state_maps,
+                &conflicted_ids,
+                provider,
+                &fetched_events,
+            ),
+        }
     };
     for id in &auth_diff {
         if let Some(ev) = fetched_events

@@ -563,7 +563,7 @@ pub fn partition_and_resolve_state<S1: std::hash::BuildHasher, S2: std::hash::Bu
         rezzy::partition_state_maps(state_maps, state_maps.len());
 
     let mut auth_difference = std::collections::HashSet::new();
-    if !heads.is_empty() {
+    if version != StateResVersion::V1 && !heads.is_empty() {
         let mut union = rezzy::bitmap::Bitmap::new();
         let mut intersection = rezzy::bitmap::Bitmap::new();
         let mut first = true;
