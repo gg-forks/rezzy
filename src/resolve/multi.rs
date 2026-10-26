@@ -1065,6 +1065,45 @@ mod tests {
         map
     }
 
+    /// State map whose only conflicted key is the topic event `topic_id`.
+    fn topic_fork(topic_id: &str) -> StateMap {
+        fork(&[
+            ("m.room.create", "", "$create"),
+            ("m.room.member", "@alice:x", "$alice_join"),
+            ("m.room.power_levels", "", "$pl"),
+            ("m.room.topic", "", topic_id),
+        ])
+    }
+
+    /// Two forks that disagree on the member slot while an unconflicted create
+    /// event is left out of the event context.
+    fn missing_unconflicted_forks() -> [StateMap; 2] {
+        [
+            fork(&[
+                ("m.room.create", "", "$create"),
+                ("m.room.member", "@alice:x", "$join_a"),
+            ]),
+            fork(&[
+                ("m.room.create", "", "$create"),
+                ("m.room.member", "@bob:x", "$join_b"),
+            ]),
+        ]
+    }
+
+    /// Resolves two forks through the lazy provider with no precomputed diff.
+    fn resolve_lazy_with_events(
+        fork_a: StateMap,
+        fork_b: StateMap,
+        events: &HashMap<alloc::string::String, LeanEvent>,
+    ) {
+        let _ = resolve_state_maps_lazy_with_diff(
+            &[fork_a, fork_b],
+            events,
+            None::<alloc::vec::Vec<alloc::string::String>>,
+            StateResVersion::V2,
+        );
+    }
+
     /// The canonical two-fork disagreement scenario shared by the concrete and
     /// lazy resolver parity tests.
     fn two_fork_scenario() -> (
@@ -1322,18 +1361,8 @@ mod tests {
             events.insert(id.into(), ev);
         }
 
-        let fork_a = fork(&[
-            ("m.room.create", "", "$create"),
-            ("m.room.member", "@alice:x", "$alice_join"),
-            ("m.room.power_levels", "", "$pl"),
-            ("m.room.topic", "", "$topic_a"),
-        ]);
-        let fork_b = fork(&[
-            ("m.room.create", "", "$create"),
-            ("m.room.member", "@alice:x", "$alice_join"),
-            ("m.room.power_levels", "", "$pl"),
-            ("m.room.topic", "", "$topic_b"),
-        ]);
+        let fork_a = topic_fork("$topic_a");
+        let fork_b = topic_fork("$topic_b");
 
         let diff = resolve_state_maps_diff(
             0,

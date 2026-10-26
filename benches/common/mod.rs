@@ -54,6 +54,25 @@ impl Xorshift128 {
     }
 }
 
+/// Single-word `xorshift64`. Kept apart from [`Xorshift128`] where a benchmark
+/// must stay on its original stream so results remain comparable across runs.
+pub struct Xorshift64(u64);
+
+impl Xorshift64 {
+    pub fn new(seed: u64) -> Self {
+        Self(seed)
+    }
+
+    pub fn next_u64(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        x
+    }
+}
+
 /// Walks `old` and `new` in lockstep (same alignment logic
 /// `diff_node_hashes` uses internally) and collects every node in `new`
 /// that wasn't already present in `old` — i.e. exactly the nodes a
