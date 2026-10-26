@@ -1461,15 +1461,16 @@ mod tests {
         let conflicted_ids = ["$c1", "$c2", "$c3"].map(alloc::string::String::from);
         // Deliberately use malformed, non-monotonic depths: correctness should
         // not change with map ordering even for synthetic or corrupt contexts.
-        let auth = HashMap::from([
-            ("$u".into(), (10, alloc::vec!["$x".into()])),
-            ("$x".into(), (15, alloc::vec![])),
-            ("$c1".into(), (30, alloc::vec!["$x".into()])),
-            ("$c2".into(), (30, alloc::vec!["$y".into()])),
-            ("$y".into(), (5, alloc::vec!["$x".into()])),
-            ("$c3".into(), (30, alloc::vec!["$z".into()])),
-            ("$z".into(), (6, alloc::vec!["$x".into()])),
-        ]);
+        let auth: HashMap<alloc::string::String, (u64, Vec<alloc::string::String>)> =
+            HashMap::from([
+                ("$u".into(), (10, alloc::vec!["$x".into()])),
+                ("$x".into(), (15, alloc::vec![])),
+                ("$c1".into(), (30, alloc::vec!["$x".into()])),
+                ("$c2".into(), (30, alloc::vec!["$y".into()])),
+                ("$y".into(), (5, alloc::vec!["$x".into()])),
+                ("$c3".into(), (30, alloc::vec!["$z".into()])),
+                ("$z".into(), (6, alloc::vec!["$x".into()])),
+            ]);
         let diff = |state_maps: &[StateMap]| {
             auth_difference(
                 &unconflicted,
@@ -1477,7 +1478,14 @@ mod tests {
                 &conflicted_ids,
                 |id, with_auth| {
                     let (depth, auth_ids) = auth.get(id)?;
-                    Some((*depth, if with_auth { auth_ids.clone() } else { vec![] }))
+                    Some((
+                        *depth,
+                        if with_auth {
+                            auth_ids.clone()
+                        } else {
+                            alloc::vec![]
+                        },
+                    ))
                 },
             )
             .unwrap()
@@ -1486,7 +1494,13 @@ mod tests {
         let forward = diff(&states);
         let reordered = [states[1].clone(), states[0].clone(), states[2].clone()];
         assert_eq!(forward, diff(&reordered));
-        assert_eq!(forward, ["$y".to_string(), "$z".to_string()]);
+        assert_eq!(
+            forward,
+            [
+                alloc::string::String::from("$y"),
+                alloc::string::String::from("$z"),
+            ]
+        );
     }
 
     #[test]
