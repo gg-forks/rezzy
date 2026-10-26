@@ -1564,7 +1564,7 @@ where
         let conflicted_ids: Vec<_> = conflicted_state_set.iter().cloned().collect();
         let auth_diff = crate::resolve::multi::auth_difference(
             &unconflicted_state,
-            &prev_states,
+            prev_states,
             &conflicted_ids,
             |id, with_auth| {
                 events_map.get(id).map(|ev| {
@@ -3820,7 +3820,7 @@ mod tests {
             .iter()
             .map(|id| {
                 compute_state_at(
-                    &id.to_string(),
+                    &(*id).to_string(),
                     &events,
                     StateResVersion::V2,
                     &String::new(),
