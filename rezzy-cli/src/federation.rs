@@ -2481,7 +2481,10 @@ fn write_frontier_checkpoint(path: &Path, frontier: &[String]) -> Result<(), App
 
 #[cfg(test)]
 mod tests {
-    use super::{domain_env_suffix, parse_signing_key, AppError, ErrorCode, FetchFailures};
+    use super::{
+        domain_env_suffix, parse_signing_key, AppError, ErrorCode, FetchFailures,
+        PKCS8_ED25519_PREFIX,
+    };
 
     fn test_dag_request<'a>(
         starts: &'a [String],
