@@ -23,6 +23,7 @@ pub(crate) struct Fixture {
     pub(crate) events: HashMap<String, LeanEvent>,
     pub(crate) forks: [StateMap; 2],
     auth_diff: Vec<String>,
+    conflicted_ids: Vec<String>,
 }
 
 pub(crate) struct CountingProvider<'a> {
@@ -269,29 +270,32 @@ pub(crate) fn build_fixture(common_members: usize, auth_chain_len: usize) -> Fix
         events,
         forks,
         auth_diff,
+        conflicted_ids: topic_ids,
     }
 }
 
 /// Warms up once, then times `iterations` runs and reports milliseconds and
-/// optional provider lookups per run. `run` returns the result's entry count;
-/// the provider counter is reset after warmup.
+/// optional provider lookups per run. The warmup result goes through `check`,
+/// which asserts it matches the reference and returns its entry count, so a
+/// wrong result fails before anything is timed. The provider counter is reset
+/// after warmup.
 ///
 /// # Panics
 /// Panics if `lookups` is present and `iterations` is zero.
-pub(crate) fn time_case(
+pub(crate) fn time_case<T>(
     label: &str,
     iterations: usize,
-    mut run: impl FnMut() -> usize,
+    mut run: impl FnMut() -> T,
+    check: impl FnOnce(&T) -> usize,
     lookups: Option<&CountingProvider<'_>>,
 ) {
-    run(); // warm up and verify that the path completes before timing
+    let result_size = check(&run()); // warm up and verify before timing
     if let Some(provider) = lookups {
         provider.reset();
     }
     let start = Instant::now();
-    let mut result_size = 0;
     for _ in 0..iterations {
-        result_size = black_box(run());
+        black_box(run());
     }
     let elapsed = start.elapsed();
     let avg_ms = elapsed.as_secs_f64() * 1_000.0 / iterations as f64;
@@ -328,6 +332,27 @@ fn verify_resolver_results(fixture: &Fixture, provider: &CountingProvider<'_>) -
     concrete
 }
 
+/// Returns a `check` for `time_case` that requires the resolved state to equal `expected`.
+fn expect_state(expected: &StateMap) -> impl FnOnce(&StateMap) -> usize + '_ {
+    move |state| {
+        assert_eq!(state, expected, "timed result matches the concrete reference");
+        state.len()
+    }
+}
+
+/// Returns a `check` for `time_case` that requires the diff to equal `expected` as a set.
+fn expect_diff(expected: Vec<String>) -> impl FnOnce(&Vec<String>) -> usize {
+    let expected = sorted(expected);
+    move |diff| {
+        assert_eq!(
+            sorted(diff.clone()),
+            expected,
+            "timed diff matches the full graph"
+        );
+        diff.len()
+    }
+}
+
 fn sorted(mut ids: Vec<String>) -> Vec<String> {
     ids.sort();
     ids
@@ -351,8 +376,8 @@ pub fn run() {
             iterations,
             || {
                 rezzy::resolve_state_maps(&fixture.forks, &fixture.events, StateResVersion::V2)
-                    .len()
             },
+            expect_state(&reference_state),
             None,
         );
         time_case(
@@ -365,9 +390,19 @@ pub fn run() {
                     None::<Vec<String>>,
                     StateResVersion::V2,
                 )
-                .len()
             },
+            expect_state(&reference_state),
             Some(&provider),
+        );
+        let fixture_precomputed = rezzy::resolve_state_maps_lazy_with_diff(
+            &fixture.forks,
+            &provider,
+            Some(fixture.auth_diff.iter().cloned()),
+            StateResVersion::V2,
+        );
+        assert_eq!(
+            fixture_precomputed, reference_state,
+            "fixture precomputed-diff result matches the concrete reference"
         );
         time_case(
             "lazy/precomputed-diff",
@@ -379,8 +414,8 @@ pub fn run() {
                     Some(fixture.auth_diff.iter().cloned()),
                     StateResVersion::V2,
                 )
-                .len()
             },
+            expect_state(&reference_state),
             Some(&provider),
         );
 
@@ -409,7 +444,15 @@ pub fn run() {
         time_case(
             "auth-graph/diff-only",
             iterations,
-            || graph.state_auth_difference(&fixture.forks).len(),
+            || graph.state_auth_difference(&fixture.forks),
+            expect_diff(
+                fixture
+                    .auth_diff
+                    .iter()
+                    .chain(&fixture.conflicted_ids)
+                    .cloned()
+                    .collect(),
+            ),
             None,
         );
         time_case(
@@ -422,8 +465,8 @@ pub fn run() {
                     Some(graph.state_auth_difference(&fixture.forks)),
                     StateResVersion::V2,
                 )
-                .len()
             },
+            expect_state(&reference_state),
             Some(&provider),
         );
 
@@ -491,8 +534,8 @@ pub fn run() {
                     partial
                         .hybrid_state_auth_difference(&fixture.forks, &provider)
                         .expect("fixture is complete")
-                        .len()
                 },
+                expect_diff(graph.state_auth_difference(&fixture.forks)),
                 Some(&provider),
             );
             time_case(
@@ -508,8 +551,8 @@ pub fn run() {
                         Some(diff),
                         StateResVersion::V2,
                     )
-                    .len()
                 },
+                expect_state(&reference_state),
                 Some(&provider),
             );
         }
