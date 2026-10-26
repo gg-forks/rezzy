@@ -5,11 +5,13 @@
 ### Fixed
 
 - **State resolution v2 (room versions 2-11): power-event classification.** Only
-  `m.room.power_levels`, `m.room.join_rules`, `m.room.create` and
-  `m.room.member` kicks and bans (leave/ban where sender != state_key) are power
-  events, as in the spec. Previously every `m.room.member` was one in v2, so
-  ordinary self-membership changes skipped the mainline ordering. V1 keeps
-  routing all memberships early (its own membership pass).
+  `m.room.power_levels`, `m.room.join_rules`, and `m.room.member` kicks and bans
+  (leave/ban where sender != state_key) are power events, as in the spec. Rezzy
+  also classifies `m.room.create` as a power event; that is an implementation
+  convenience, not a spec claim, and is harmless because the create key cannot
+  be conflicted in a well-formed room. Previously every `m.room.member` was a
+  power event in v2, so ordinary self-membership changes skipped the mainline
+  ordering. V1 keeps routing all memberships early (its own membership pass).
 - **Auth difference in v2.** `resolve_state_maps` and
   `resolve_state_maps_lazy_with_diff` now put the auth difference (`∪Cᵢ − ∩Cᵢ`)
   into the set they resolve.

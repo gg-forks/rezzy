@@ -3739,12 +3739,15 @@ impl<Id, C: EventContent, K: AsRef<str>> LeanEvent<Id, C, K> {
     /// room's administrative state and must go through the full power-phase
     /// resolution pipeline.
     ///
-    /// Power events are:
-    /// - `m.room.create`
+    /// Spec power events are:
     /// - `m.room.power_levels`
     /// - `m.room.join_rules`
     /// - For V1, all `m.room.member` events (the V1 membership-conflict pass)
     /// - For V2 and later, membership bans or kicks
+    ///
+    /// `m.room.create` is included for rezzy's resolution pipeline; the Matrix
+    /// spec does not classify it as a power event. It cannot be conflicted in
+    /// a well-formed room.
     #[must_use]
     pub fn is_power_event(&self, version: crate::StateResVersion) -> bool {
         self.event_type == crate::basespec::event_types::M_ROOM_CREATE
