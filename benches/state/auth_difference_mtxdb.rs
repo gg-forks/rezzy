@@ -321,6 +321,15 @@ pub fn run() {
         plain.sort();
         merged.sort();
         assert_eq!(plain, merged, "both mtxdb diffs agree");
+        let mut from_graph = rezzy::auth::roaring::AuthGraph::try_build(&fixture.events)
+            .expect("fixture is auth-closed")
+            .state_auth_difference(&fixture.forks);
+        from_graph.sort();
+        assert_eq!(merged, from_graph, "mtxdb and rezzy AuthGraph diffs agree");
+        println!(
+            "diff paths agree: mtxdb closures, mtxdb merged, rezzy AuthGraph ({} events)",
+            merged.len()
+        );
         time("mtxdb/closure-diff-only merged", iterations, || {
             (
                 mtxdb_auth_difference_merged(&store, &fixture.forks).len(),
