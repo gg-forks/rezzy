@@ -374,10 +374,15 @@ where
 ///
 /// This allows callers who compute `conflicted_keys` from a *narrow*,
 /// pre-widening event set (e.g. before MSC4297's conflicted subgraph supplement)
-/// to keep supplemental events from deciding their own state keys.
+/// to restrict V1 updates to those keys. Later versions allow supplemental
+/// events to update working state. Unconflicted values take precedence in
+/// the final result for every version.
 ///
 /// When in doubt, use [`resolve_semilattice_fold`] which derives `conflicted_keys`
 /// internally.
+///
+/// # Panics
+/// Panics if `inputs.version` is [`StateResVersion::V3`].
 #[must_use]
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_semilattice_fold_with_conflicted_keys<Id, C, S1, S2>(

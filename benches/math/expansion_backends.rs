@@ -122,6 +122,7 @@ pub fn check() {
     println!("  candidate expansion determinism: ok");
 }
 
+/// Formats bytes as lowercase hexadecimal with two digits per byte.
 pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().fold(String::new(), |mut s, b| {
         use std::fmt::Write;
@@ -131,6 +132,8 @@ pub fn hex(bytes: &[u8]) -> String {
 }
 
 /// Unpacks `SEED_BYTES` bytes into little-endian 16-bit lanes.
+/// Short input leaves unfilled lanes zero; an unmatched final byte and bytes
+/// beyond `SEED_BYTES` are ignored.
 pub fn unpack_lanes(bytes: &[u8]) -> [u16; SEED_BYTES / 2] {
     let mut out = [0u16; SEED_BYTES / 2];
     for (lane, pair) in out.iter_mut().zip(bytes.chunks_exact(2)) {

@@ -204,13 +204,12 @@ where
     .0
 }
 
-/// The auth difference of the state maps, as the v2 spec defines it:
-/// `∪ Cᵢ − ∩ Cᵢ`, where `Cᵢ` is the full auth chain of state map `Sᵢ` (the
-/// union of the auth chains of its events). It is part of the full conflicted
-/// set for every v2 version, alongside the conflicted state and (v2.1+) the
-/// conflicted subgraph.
+/// Computes the auth-ancestor contribution to the v2 auth difference:
+/// ancestors reached by some state maps but not all. Conflicted state events
+/// themselves are handled separately by the caller; they appear here only
+/// when cited as auth ancestors. Returns sorted, distinct IDs.
 ///
-/// The auth chain of the unconflicted state is in every `Cᵢ`, so it never
+/// The auth chain of the unconflicted state is in every map's auth chain, so it never
 /// contributes to the difference: each map's chain is walked from the auth
 /// events of its conflicted state events, deepest first, and the unconflicted
 /// chain is only advanced as far as needed to stop that walk where the two
@@ -314,6 +313,8 @@ where
     diff
 }
 
+/// Marks unseen auth IDs visited and queues those with known depths, excluding
+/// IDs already reached from unconflicted state. Missing events are skipped.
 fn enqueue_conflicted_auth_events<Id, F>(
     auth_ids: Vec<Id>,
     unconflicted_visited: &FastSet<Id>,
@@ -453,6 +454,13 @@ where
     )
 }
 
+/// Resolves parent state maps and returns the result with the original set of
+/// conflicted keys. Versions after V1 also resolve auth-difference events;
+/// unconflicted values take precedence in the final result.
+///
+/// # Panics
+/// Panics for empty input, missing conflicted events, or an unsupported V3
+/// resolution request that reaches the iterative resolver.
 fn resolve_state_maps_generic<Id, C, S, K>(
     state_maps: &[SharedState<Id, K>],
     event_context: &HashMap<Id, LeanEvent<Id, C, K>, S>,
@@ -724,7 +732,8 @@ where
 }
 
 /// [`auth_difference`] over a lazy provider, reusing events already in
-/// `fetched_events` and looking each other event up at most once.
+/// `fetched_events` and caching each event found through the provider.
+/// Missing events are skipped and may be looked up more than once.
 fn lazy_auth_difference<Id, C>(
     unconflicted_state: &SharedState<Id>,
     state_maps: &[SharedState<Id>],
@@ -818,22 +827,31 @@ fn insert_subgraph_events<Id: EventId, C: Clone>(
 /// into a `HashMap`, this function:
 ///
 /// 1. Partitions state maps into unconflicted/conflicted (no events needed).
-/// 2. Fetches **only** the conflicted events via `provider.get_event(id)`.
-/// 3. BFS-walks auth chains from conflicted events to build the minimal auth
-///    context (lazy — only touches events reachable from the conflicted set).
-/// 4. For V2.1+, computes the conflicted subgraph from the lazily-built context.
+/// 2. Fetches conflicted state events and, for versions after V1, adds the
+///    supplied or computed auth-difference events as resolution candidates.
+/// 3. Walks candidate auth chains to obtain their authorization context.
+/// 4. For V2.1 and V2.1.1, computes the conflicted subgraph from that context.
 /// 5. Delegates to [`resolve_iterative_sort`](crate::resolve::iterative::resolve_iterative_sort).
+///
+/// `precomputed_auth_diff` supplies candidate IDs as-is, including when it is
+/// `Some(empty)`. `None` computes the difference using event depths, assuming
+/// auth events are shallower than the events citing them. V1 ignores this
+/// argument. Missing auth ancestors or supplied diff events are skipped;
+/// callers must provide complete event data for correct resolution.
+/// Unconflicted values take precedence in the final result. Identical input
+/// maps are returned directly without fetching events.
 ///
 /// # Performance
 ///
-/// For rooms with large auth chains, this can be significantly faster than
-/// [`resolve_state_maps`] because it never loads events outside the
-/// backwards-reachable set of the conflicted events.
+/// Computing the difference may read unconflicted state events and their auth
+/// ancestors. A precomputed difference avoids that calculation, but candidate
+/// auth chains are still loaded for authorization.
 ///
 /// # Panics
 ///
 /// Panics if `state_maps` is empty, or if a conflicted event ID from
-/// the state maps is not found via the provider.
+/// the state maps is not found via the provider. Also panics for V3 when
+/// distinct input maps require iterative resolution.
 ///
 /// [`EventProvider`]: crate::basespec::rezzy_types::EventProvider
 #[must_use]

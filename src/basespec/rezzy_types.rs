@@ -3746,7 +3746,8 @@ impl<Id, C: EventContent, K: AsRef<str>> LeanEvent<Id, C, K> {
     /// - `m.room.power_levels`
     /// - `m.room.join_rules`
     /// - For V1, all `m.room.member` events (the V1 membership-conflict pass)
-    /// - For V2 and later, membership bans or kicks
+    /// - For V2 and later, events with `ban` or `leave` membership and a
+    ///   `state_key` different from the sender
     ///
     /// `m.room.create` is included for rezzy's resolution pipeline; the Matrix
     /// spec does not classify it as a power event. It cannot be conflicted in

@@ -545,11 +545,14 @@ pub fn resolve_parent_states<S: std::hash::BuildHasher>(
 }
 
 /// Partition and resolve state across components.
+/// Returns the resolved state and elapsed partitioning/resolution time.
+/// After V1, supplements conflicts with the auth-chain difference of `heads`;
+/// heads absent from `auth_graph` and events absent from `events_map` are skipped.
 ///
 /// # Panics
 ///
-/// Panics only if an auth-chain bitmap contains an index absent from its own
-/// graph index.
+/// Panics if an auth-chain bitmap contains an index absent from its own
+/// graph index, or if `version` is [`StateResVersion::V3`].
 #[must_use]
 pub fn partition_and_resolve_state<S1: std::hash::BuildHasher, S2: std::hash::BuildHasher>(
     heads: &[String],

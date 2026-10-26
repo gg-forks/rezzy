@@ -38,6 +38,8 @@ use std::time::{Duration, Instant};
 
 type Raw = ((EventType, String), String);
 
+/// Builds `n` distinct seeded state entries, drawing mostly membership keys
+/// with a smaller share of custom MSC keys.
 fn make_entries(n: usize, seed: u64) -> Vec<Raw> {
     generate_unique_entries(
         n,

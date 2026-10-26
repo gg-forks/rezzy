@@ -30,6 +30,8 @@ use super::auth_difference::{build_fixture, Fixture, StateMap};
 const ROOM: &str = "!bench:example.com";
 const EVENTS_COLLECTION: [u8; 16] = *b"bench-room-evts\0";
 
+/// Derives a fixture storage key from the first 16 bytes of the event ID's
+/// BLAKE3 digest.
 fn node_id(event_id: &str) -> [u8; 16] {
     let digest = blake3::hash(event_id.as_bytes());
     let mut id = [0; 16];
@@ -37,6 +39,8 @@ fn node_id(event_id: &str) -> [u8; 16] {
     id
 }
 
+/// Serializes fixture event fields for storage, using an empty state key when
+/// absent and an empty `prev_events` list.
 fn pdu_json(ev: &LeanEvent) -> String {
     rezzy::json!({
         "event_id": ev.event_id.clone(),
@@ -73,6 +77,7 @@ impl Store {
 }
 
 impl Drop for Store {
+    /// Attempts to remove the benchmark directory, ignoring cleanup errors.
     fn drop(&mut self) {
         // Database owns open files under root; close it before directory cleanup.
         drop(self.db.take());
@@ -80,6 +85,14 @@ impl Drop for Store {
     }
 }
 
+/// Replaces this process's `name`-qualified benchmark directory under the
+/// system temporary directory with a database holding fixture events and auth
+/// edges. Closures must be rebuilt separately; dropping the store attempts
+/// to remove its directory.
+///
+/// # Panics
+/// Panics if the fixture cites missing auth events, or database creation,
+/// event writes, transaction commit, or auth-edge recording fails.
 fn store_fixture(fixture: &Fixture, name: &str) -> Store {
     let root =
         std::env::temp_dir().join(format!("rezzy-bench-mtxdb-{name}-{}", std::process::id()));
@@ -144,6 +157,7 @@ struct MtxdbProvider<'a> {
 }
 
 impl<'a> MtxdbProvider<'a> {
+    /// Creates an empty per-event cache and read counter for the stored fixture.
     fn new(store: &'a Store) -> Self {
         Self {
             store,
@@ -156,6 +170,11 @@ impl<'a> MtxdbProvider<'a> {
         }
     }
 
+    /// Reads and parses a stored event, counting the read even if no record
+    /// exists. Missing records return `None`.
+    ///
+    /// # Panics
+    /// Panics on storage errors or invalid stored JSON or event fields.
     fn read(&self, id: &str) -> Option<LeanEvent> {
         self.reads.fetch_add(1, Ordering::Relaxed);
         let record = self
@@ -170,6 +189,8 @@ impl<'a> MtxdbProvider<'a> {
 }
 
 impl EventProvider<String, JsonValue> for MtxdbProvider<'_> {
+    /// Returns a cached event, reading it on first access. Unknown IDs and
+    /// missing records return `None`; read and parse failures panic.
     fn get_event(&self, id: &String) -> Option<&LeanEvent> {
         self.cells
             .get(id.as_str())?
@@ -179,6 +200,11 @@ impl EventProvider<String, JsonValue> for MtxdbProvider<'_> {
 }
 
 /// `∪ Cᵢ − ∩ Cᵢ` from mtxdb's persisted closures, each state event included.
+/// An empty fork list returns an empty difference.
+///
+/// # Panics
+/// Panics for an empty state map, missing short IDs, closures, or labels,
+/// storage errors, or incompatible bitmap domains.
 fn mtxdb_auth_difference(store: &Store, forks: &[StateMap]) -> Vec<String> {
     let mut union: Option<BitmapSet> = None;
     let mut intersection: Option<BitmapSet> = None;
@@ -227,6 +253,10 @@ fn mtxdb_auth_difference(store: &Store, forks: &[StateMap]) -> Vec<String> {
 /// needs subtracting from the conflicted part), short ids come from memory,
 /// and chains accumulate in place in a rezzy `Bitmap` because `BitmapSet`'s
 /// set operations allocate a new set per merge.
+///
+/// # Panics
+/// Panics for an empty fork list, missing short IDs, closures, or labels, or
+/// closure-read errors.
 fn mtxdb_auth_difference_merged(store: &Store, forks: &[StateMap]) -> Vec<String> {
     let closure_of = |id: &String, into: &mut rezzy::bitmap::Bitmap| {
         let short = store.shorts[id];
@@ -276,6 +306,11 @@ fn mtxdb_auth_difference_merged(store: &Store, forks: &[StateMap]) -> Vec<String
         .collect()
 }
 
+/// Resolves fixture forks with V2 and supplied auth-difference candidates,
+/// returning the state size and the provider's cumulative read count.
+///
+/// # Panics
+/// Propagates provider and lazy-resolver panics.
 fn resolve_with_diff(
     provider: &MtxdbProvider<'_>,
     forks: &[StateMap],
@@ -286,6 +321,8 @@ fn resolve_with_diff(
     (resolved.len(), provider.reads.load(Ordering::Relaxed))
 }
 
+/// Warms up once, then reports mean milliseconds over `iterations` runs.
+/// `run` returns the state size and read count; the last run's counts are shown.
 fn time(label: &str, iterations: usize, mut run: impl FnMut() -> (usize, usize)) {
     run(); // warm up and verify the path completes
     let start = Instant::now();
@@ -300,6 +337,8 @@ fn time(label: &str, iterations: usize, mut run: impl FnMut() -> (usize, usize))
     );
 }
 
+/// Sums file sizes in bytes below `path`. Unreadable directories and metadata
+/// contribute zero; unreadable directory entries are skipped.
 fn dir_size(path: &std::path::Path) -> u64 {
     std::fs::read_dir(path).map_or(0, |entries| {
         entries

@@ -864,6 +864,13 @@ struct RawEmitter<'a, F> {
 }
 
 impl<F: FnMut(&str) -> bool> RawEmitter<'_, F> {
+    /// Appends one JSON value, excluding matching object keys at every depth.
+    /// Strict mode accepts only Matrix canonical integers; permissive mode
+    /// normalizes number spellings. Duplicate object keys use the last value.
+    ///
+    /// # Errors
+    /// Returns parsing or numeric-validation errors; output may be partially
+    /// appended when an error occurs.
     fn emit_raw(&mut self, raw: &[u8]) -> Result<(), Error> {
         let mut tokenizer = Tokenizer::new(raw);
         tokenizer.ws();
@@ -880,6 +887,13 @@ impl<F: FnMut(&str) -> bool> RawEmitter<'_, F> {
         }
     }
 
+    /// Appends an object with decoded keys sorted and duplicate keys resolved
+    /// to their last value, omitting keys selected by `exclude`.
+    ///
+    /// # Errors
+    /// Returns [`Error::InvalidToken`] for object-tokenization errors,
+    /// [`Error::TrailingCharacters`] for trailing input, or a propagated
+    /// value-emission error. Output may be partially appended.
     fn emit_object(&mut self, tokenizer: &mut Tokenizer<'_>, raw: &[u8]) -> Result<(), Error> {
         let mut members = tokenizer
             .object_members()
@@ -909,6 +923,13 @@ impl<F: FnMut(&str) -> bool> RawEmitter<'_, F> {
         Ok(())
     }
 
+    /// Appends array elements in source order, applying the same key filter
+    /// and numeric rules to nested values.
+    ///
+    /// # Errors
+    /// Returns [`Error::InvalidToken`] for invalid array syntax or value
+    /// scanning, [`Error::TrailingCharacters`] for trailing input, or a
+    /// propagated value-emission error. Output may be partially appended.
     fn emit_array(&mut self, tokenizer: &mut Tokenizer<'_>, raw: &[u8]) -> Result<(), Error> {
         tokenizer.pos = tokenizer.pos.checked_add(1).ok_or(Error::InvalidToken)?;
         tokenizer.ws();
@@ -942,6 +963,11 @@ impl<F: FnMut(&str) -> bool> RawEmitter<'_, F> {
     }
 }
 
+/// Appends filtered JSON with [`RawEmitter::emit_raw`]'s numeric rules and
+/// last-value handling for duplicate object keys.
+///
+/// # Errors
+/// Propagates emission errors, potentially leaving a partial value in `out`.
 fn emit_raw<F>(raw: &[u8], out: &mut String, exclude: &mut F, strict: bool) -> Result<(), Error>
 where
     F: FnMut(&str) -> bool,
@@ -1307,7 +1333,8 @@ impl<'a> Tokenizer<'a> {
     /// Otherwise, a direct subslice of the input is yielded without touching `scratch_buf`.
     ///
     /// # Errors
-    /// Returns [`TokenizerError`] for malformed JSON or invalid escape sequences.
+    /// Returns [`TokenizerError`] for malformed JSON or invalid escape sequences,
+    /// or propagates the callback's error. Earlier callbacks are not rolled back.
     pub fn for_each_object_member<F>(
         &mut self,
         scratch_buf: &mut String,
@@ -1327,6 +1354,13 @@ impl<'a> Tokenizer<'a> {
         })
     }
 
+    /// Visits members in source order, retaining duplicates. Keys are passed
+    /// without quotes and still escaped; values are borrowed JSON spans.
+    /// On success, advances past the object's closing brace.
+    ///
+    /// # Errors
+    /// Propagates tokenization and visitor errors without restoring the cursor
+    /// or undoing prior visitor calls.
     fn walk_raw_object_members<F>(&mut self, mut visit: F) -> Result<(), TokenizerError>
     where
         F: FnMut(&'a [u8], ValueType, &'a [u8]) -> Result<(), TokenizerError>,
@@ -1946,6 +1980,13 @@ impl<'a> ValueRef<'a> {
         }
     }
 
+    /// Consumes a container whose opening delimiter is at the current cursor,
+    /// calling `step` for each entry until `close` (`]` or `}`) is consumed.
+    ///
+    /// # Errors
+    /// Returns [`TokenizerError::DepthLimitExceeded`] at the nesting limit,
+    /// [`TokenizerError::InvalidToken`] for invalid separators or termination,
+    /// or an error from `step`. Cursor and depth are not restored on error.
     fn parse_masked_container<F>(
         tokenizer: &mut Tokenizer<'a>,
         close: u8,
@@ -1980,6 +2021,12 @@ impl<'a> ValueRef<'a> {
         }
     }
 
+    /// Parses an array in source order, applying `mask` to each element at
+    /// the current object-key path in `segments`.
+    ///
+    /// # Errors
+    /// Propagates container and element parsing errors without restoring the
+    /// tokenizer or path state.
     fn parse_masked_array(
         tokenizer: &mut Tokenizer<'a>,
         mask: &FieldMask<'_>,
@@ -1993,6 +2040,13 @@ impl<'a> ValueRef<'a> {
         Ok(Self::Array(items))
     }
 
+    /// Parses selected object members, extending `segments` for mask matching.
+    /// Returned keys retain their source escapes; duplicate keys remain in
+    /// source order. Unselected values are scanned without being retained.
+    ///
+    /// # Errors
+    /// Propagates key, value, and container parsing errors without restoring
+    /// the tokenizer or path state.
     fn parse_masked_object(
         tokenizer: &mut Tokenizer<'a>,
         mask: &FieldMask<'_>,

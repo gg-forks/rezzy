@@ -15,10 +15,12 @@ use crate::common::Xorshift128;
 struct Rng(Xorshift128);
 
 impl Rng {
+    /// Starts a repeatable sequence of benchmark samples from `seed`.
     fn new(seed: u64) -> Self {
         Self(Xorshift128::new(seed))
     }
 
+    /// Advances the seeded sequence and returns the next sample.
     fn next(&mut self) -> u64 {
         self.0.next_u64()
     }

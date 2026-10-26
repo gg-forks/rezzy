@@ -279,6 +279,8 @@ impl Size {
         }
     }
 
+    /// Uses `idx` for small/medium fixture IDs, or draws 400 alphanumeric bytes
+    /// after a `$` prefix for large IDs.
     fn event_id(self, rng: &mut Xorshift128, idx: usize) -> String {
         match self {
             Size::Small => format!("${idx}"),

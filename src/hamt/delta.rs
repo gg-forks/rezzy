@@ -136,6 +136,13 @@ fn diff_short_circuit<K, V, E>(
 }
 
 /// Recursively compute the structural diff between two HAMT nodes.
+/// Appends entries present only in B to `added` and entries present only in A
+/// to `removed`; a changed value appears in both with its respective value.
+///
+/// # Errors
+/// Propagates resolver failures as [`HamtTraversalError::Resolve`] and reports
+/// [`HamtTraversalError::MaxDepthExceeded`] at the routing limit. Output
+/// buffers may contain partial changes on error.
 fn diff_nodes<K, V, F, E>(
     node_a: &NodePtr<K, V>,
     node_b: &NodePtr<K, V>,
@@ -279,6 +286,15 @@ struct CrossKindSlot<'a, K, V> {
     leaf_is_a: bool,
 }
 
+/// Appends the changes for a slot holding a leaf on one side and a subtree
+/// on the other. `cross.leaf_is_a` selects the leaf's side; exact key/value
+/// matches are omitted, while changed values are removed and added.
+/// `depth` is the subtree root's depth in the full HAMT.
+///
+/// # Errors
+/// Returns [`HamtTraversalError::Resolve`] on a resolver failure or
+/// [`HamtTraversalError::MaxDepthExceeded`] at the routing limit. Output
+/// buffers may contain partial changes on error.
 fn diff_leaf_subtree<K: DeltaElem, V: DeltaElem, E>(
     cross: &CrossKindSlot<'_, K, V>,
     added: &mut Vec<(K, V)>,

@@ -1103,6 +1103,9 @@ fn opt_str(value: Option<&str>) -> JsonValue {
 
 /// Append one JSON line per attempt. Only error text and statuses are logged,
 /// never signing keys or the `Authorization` header.
+///
+/// # Errors
+/// Propagates file I/O and record-serialization errors.
 fn append_attempts(
     path: &Path,
     round: u32,
@@ -1121,6 +1124,13 @@ fn append_attempts(
     )
 }
 
+/// Appends request-attempt records as JSONL, creating the file if needed.
+/// Empty `attempts` leaves the file untouched. Timestamps use Unix seconds;
+/// `tried` identifies repeated event requests.
+///
+/// # Errors
+/// Propagates file I/O errors and returns [`ErrorCode::MalformedJson`] for
+/// serialization failures. Earlier records may already have been written.
 fn append_attempt_records(
     path: &Path,
     round: u32,
