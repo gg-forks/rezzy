@@ -373,10 +373,20 @@ pub fn run() {
             let mut partial =
                 rezzy::auth::roaring::AuthGraph::try_build(&HashMap::<String, LeanEvent>::new())
                     .expect("empty set is auth-closed");
+            let insert_start = Instant::now();
             for id in &order[..keep] {
                 partial
                     .insert(&fixture.events[id])
                     .expect("topological prefix is auth-closed");
+            }
+            if missing_pct == 0 {
+                // Graph update cost: every event inserted one at a time, as a
+                // server would on accepting it.
+                let us = insert_start.elapsed().as_secs_f64() * 1e6;
+                println!(
+                    "auth-graph insert: {us:.0} us for {keep} events ({:.2} us/event)",
+                    us / keep as f64
+                );
             }
             time_case(
                 &format!("hybrid/{missing_pct}%-unindexed diff-only"),
@@ -386,6 +396,23 @@ pub fn run() {
                         .hybrid_state_auth_difference(&fixture.forks, &provider)
                         .expect("fixture is complete")
                         .len()
+                },
+                Some(&provider),
+            );
+            time_case(
+                &format!("lazy/hybrid-{missing_pct}%-unindexed"),
+                iterations,
+                || {
+                    let diff = partial
+                        .hybrid_state_auth_difference(&fixture.forks, &provider)
+                        .expect("fixture is complete");
+                    rezzy::resolve_state_maps_lazy_with_diff(
+                        &fixture.forks,
+                        &provider,
+                        Some(diff),
+                        StateResVersion::V2,
+                    )
+                    .len()
                 },
                 Some(&provider),
             );
