@@ -194,8 +194,8 @@ fn process_lattice_event<'a, Id, C, K, S2: BuildHasher, S3: BuildHasher>(
     );
     // `conflicted_events` may contain supplemental auth-chain/subgraph events
     // whose own state key was not conflicted. They may authenticate this
-    // candidate. In V2, any accepted event may decide its key; in V2.1+, only
-    // genuinely conflicted keys may be decided.
+    // candidate. After V1, any accepted event may decide its key; V1 restricts
+    // updates to genuinely conflicted keys.
     if !crate::resolve::iterative::decides_key(ctx.version, ctx.conflicted_keys, &key) {
         return;
     }
