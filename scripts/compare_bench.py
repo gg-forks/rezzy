@@ -240,9 +240,10 @@ def compare_metrics(
     for label, values in history.items():
         if values:
             new_best[label] = min(new_best.get(label, values[0]), *values)
-    new_history = {
-        label: values[-HISTORY_LEN:] for label, values in history.items() if values
-    }
+    # Only keep metrics present in this run. A missing label breaks the run
+    # sequence, so values from before that gap must not become its baseline if
+    # the metric later reappears.
+    new_history: dict[str, list[float]] = {}
     baselines: dict[str, float] = {}
     notices: list[str] = []
     warnings: list[str] = []
@@ -263,19 +264,18 @@ def compare_metrics(
         all_values = [value, *history_values, *snapshot_values]
         new_best[label] = min(all_values)
 
-        samples = new_history.setdefault(label, [])
-        samples.append(value)
-        new_history[label] = samples[-HISTORY_LEN:]
-
         if prior is None:
+            new_history[label] = [value]
             continue
         baselines[label] = prior
         if value < prior:
+            new_history[label] = [*history_values, value][-HISTORY_LEN:]
             continue
         delta = value - prior
         # Sub-floor deltas are pure runner jitter on microbenches: skip
         # classification entirely (the new-best ratchet above already ran).
         if delta < min_absolute_delta:
+            new_history[label] = [*history_values, value][-HISTORY_LEN:]
             continue
         increase = (
             value / prior - 1.0 if prior > 0 else (float("inf") if value > 0 else 0.0)
@@ -284,7 +284,8 @@ def compare_metrics(
             f"{label}: {value:.4f}ms is {increase * 100:.1f}% above baseline "
             f"{prior:.4f}ms (+{delta:.4f}ms)"
         )
-        if increase >= failure_margin and len(history_values) >= 3:
+        bootstrap_failure = increase >= failure_margin and len(history_values) < 3
+        if increase >= failure_margin and not bootstrap_failure:
             failures.append(message)
         elif increase >= failure_margin:
             warnings.append(
@@ -294,6 +295,13 @@ def compare_metrics(
             warnings.append(message)
         elif increase > notice_margin:
             notices.append(message)
+
+        # Do not let a failure-sized bootstrap outlier become the raw-run
+        # baseline. It remains a warning until comparable runs establish a
+        # baseline, rather than normalizing a persistent slowdown.
+        if not bootstrap_failure:
+            samples = [*history_values, value]
+            new_history[label] = samples[-HISTORY_LEN:]
     return new_best, new_history, baselines, notices, warnings, failures
 
 
