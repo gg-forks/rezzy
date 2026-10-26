@@ -628,6 +628,13 @@ fn encrypt_key_file_with_origin(
 fn parse_signing_key(text: &str) -> Result<SigningKeySpec, String> {
     let mut fields = text.split_whitespace().filter(|s| !s.starts_with('#'));
     let first = fields.next().ok_or("signing key file is empty")?;
+    // A bare base64 seed is 43 characters, so a long all-hex `0x` token cannot be one.
+    if let Some(digits) = first
+        .strip_prefix("0x")
+        .filter(|digits| digits.len() > 64 && digits.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        return parse_conduwuit_keypair(digits);
+    }
     let (key_id, encoded) = if first.starts_with("ed25519:") {
         (
             first.to_owned(),
@@ -651,6 +658,47 @@ fn parse_signing_key(text: &str) -> Result<SigningKeySpec, String> {
     Ok(SigningKeySpec {
         key_id,
         key: SigningKey::from(bytes),
+    })
+}
+
+/// The 16 bytes that precede the seed in a PKCS#8 v2 Ed25519 private key.
+const PKCS8_ED25519_PREFIX: [u8; 16] = [
+    0x30, 0x51, 0x02, 0x01, 0x01, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
+];
+
+/// Reads a conduwuit `keypair` value dumped as `0x<hex>`: the key version as
+/// ASCII (which becomes the key ID), a `0xff` separator, then a PKCS#8 v2
+/// Ed25519 private key whose seed follows the fixed 16-byte header.
+fn parse_conduwuit_keypair(hex: &str) -> Result<SigningKeySpec, String> {
+    if hex.len() % 2 != 0 {
+        return Err("odd number of hex digits in conduwuit keypair".to_owned());
+    }
+    let bytes = hex
+        .as_bytes()
+        .chunks(2)
+        .map(|pair| {
+            let digits = std::str::from_utf8(pair).map_err(|e| e.to_string())?;
+            u8::from_str_radix(digits, 16).map_err(|e| format!("invalid hex digits: {e}"))
+        })
+        .collect::<Result<Vec<u8>, String>>()?;
+    let split = bytes
+        .iter()
+        .position(|byte| *byte == 0xff)
+        .ok_or("conduwuit keypair has no 0xff version separator")?;
+    let version = std::str::from_utf8(&bytes[..split])
+        .ok()
+        .filter(|version| {
+            !version.is_empty() && version.bytes().all(|byte| byte.is_ascii_graphic())
+        })
+        .ok_or("conduwuit keypair has no ASCII key version")?;
+    let seed: [u8; 32] = bytes[split + 1..]
+        .strip_prefix(&PKCS8_ED25519_PREFIX)
+        .and_then(|rest| rest.get(..32))
+        .and_then(|seed| seed.try_into().ok())
+        .ok_or("conduwuit keypair is not a PKCS#8 Ed25519 private key")?;
+    Ok(SigningKeySpec {
+        key_id: format!("ed25519:{version}"),
+        key: SigningKey::from(seed),
     })
 }
 
@@ -2491,6 +2539,34 @@ mod tests {
         let key =
             parse_signing_key("ed25519:7 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").unwrap();
         assert_eq!(key.key_id, "ed25519:7");
+    }
+
+    fn conduwuit_keypair_dump(version: &str, seed: [u8; 32]) -> String {
+        let mut bytes = version.as_bytes().to_vec();
+        bytes.push(0xff);
+        bytes.extend_from_slice(&PKCS8_ED25519_PREFIX);
+        bytes.extend_from_slice(&seed);
+        bytes.extend_from_slice(&[0x81, 0x21, 0x00]);
+        bytes.extend_from_slice(&[7; 32]);
+        let digits: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        format!("0x{digits}")
+    }
+
+    #[test]
+    fn parses_a_conduwuit_keypair_dump() {
+        let seed = [9_u8; 32];
+        let key = parse_signing_key(&conduwuit_keypair_dump("0vhRKHKw", seed)).unwrap();
+        assert_eq!(key.key_id, "ed25519:0vhRKHKw");
+        assert_eq!(<[u8; 32]>::from(key.key), seed);
+    }
+
+    #[test]
+    fn refuses_a_conduwuit_keypair_that_is_not_pkcs8_ed25519() {
+        let mut dump = conduwuit_keypair_dump("0vhRKHKw", [9; 32]);
+        dump.replace_range(2 + 9 * 2..2 + 10 * 2, "ff");
+        assert!(parse_signing_key(&dump).is_err());
+        assert!(parse_signing_key("0xabc").is_err());
+        assert!(parse_signing_key("0x6161").is_err());
     }
 
     #[test]
