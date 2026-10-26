@@ -439,10 +439,11 @@ fn graph_by_insert(events: &HashMap<String, LeanEvent>) -> rezzy::auth::roaring:
     let built = rezzy::auth::roaring::AuthGraph::build(events);
     let mut graph = rezzy::auth::roaring::AuthGraph::build(&HashMap::<String, LeanEvent>::new());
     for id in built.index.items() {
-        assert!(graph.insert(&events[id]));
+        assert_eq!(graph.insert(&events[id]), Ok(true));
     }
-    assert!(
-        !graph.insert(&events[&built.index.items()[0]]),
+    assert_eq!(
+        graph.insert(&events[&built.index.items()[0]]),
+        Ok(false),
         "re-insert is a no-op"
     );
     assert_eq!(graph.auth_bitmaps, built.auth_bitmaps);
@@ -481,4 +482,24 @@ fn test_auth_graph_state_difference_matches_computed_diff() {
         );
         assert_eq!(with_graph, computed, "{name}");
     }
+}
+
+/// An event whose auth events are not in the graph yet is refused, and the
+/// graph is unchanged, rather than getting a bitmap that a later parent could
+/// never repair.
+#[test]
+fn test_auth_graph_insert_refuses_missing_auth_events() {
+    let map = room_with_chain(true);
+    let mut graph = rezzy::auth::roaring::AuthGraph::build(&HashMap::<String, LeanEvent>::new());
+    assert_eq!(graph.insert(&map["$create"]), Ok(true));
+
+    let err = graph.insert(&map["$m_a"]).unwrap_err();
+    let mut missing = err.missing.clone();
+    missing.sort();
+    assert_eq!(missing, ["$bob_join", "$jr", "$pl"]);
+    assert_eq!(
+        graph.index.len(),
+        1,
+        "a refused insert leaves the graph unchanged"
+    );
 }

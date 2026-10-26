@@ -16,6 +16,26 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
+/// [`AuthGraph::insert`] was given an event whose auth events are not all in
+/// the graph yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingAuthEvents<Id> {
+    /// The auth events that must be inserted first.
+    pub missing: Vec<Id>,
+}
+
+impl<Id: core::fmt::Debug> core::fmt::Display for MissingAuthEvents<Id> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "auth events not in the auth graph yet: {:?}",
+            self.missing
+        )
+    }
+}
+
+impl<Id: core::fmt::Debug> core::error::Error for MissingAuthEvents<Id> {}
+
 /// A topologically-ordered auth DAG with pre-computed transitive reachability bitmaps.
 ///
 /// Each event is assigned a dense integer index (topological order), and its
@@ -156,17 +176,32 @@ where
     /// Adds one event, appending it to the topological order.
     ///
     /// Its bitmap is the union of its auth events' bitmaps plus their own
-    /// indices, so the graph stays exact as long as each event is inserted after
-    /// its auth events (the order events are accepted in). Auth events not yet
-    /// in the graph are skipped, as in [`Self::build`]. Returns `false` if the
-    /// event was already present.
+    /// indices. Every auth event must already be in the graph: a bitmap built
+    /// without one would stay incomplete even after that event arrived, so a
+    /// missing auth event is an error and the graph is left unchanged. Insert
+    /// in the order events are accepted, or rebuild after backfilling.
+    ///
+    /// Returns `Ok(false)` if the event was already present.
+    ///
+    /// # Errors
+    /// Returns [`MissingAuthEvents`] listing the auth events not yet in the
+    /// graph.
     ///
     /// # Panics
     /// Panics if the graph already holds as many events as a `u32` index can
     /// address, as [`Self::build`] does.
-    pub fn insert<C>(&mut self, event: &LeanEvent<Id, C>) -> bool {
+    pub fn insert<C>(&mut self, event: &LeanEvent<Id, C>) -> Result<bool, MissingAuthEvents<Id>> {
         if self.index.index_of(&event.event_id).is_some() {
-            return false;
+            return Ok(false);
+        }
+        let missing: Vec<Id> = event
+            .auth_events
+            .iter()
+            .filter(|id| self.index.index_of(id).is_none())
+            .cloned()
+            .collect();
+        if !missing.is_empty() {
+            return Err(MissingAuthEvents { missing });
         }
         let mut bitmap = Bitmap::new();
         for auth_id in &event.auth_events {
@@ -179,7 +214,7 @@ where
             .try_push(event.event_id.clone())
             .expect("auth graph event count fits in a u32 index");
         self.auth_bitmaps.push(bitmap);
-        true
+        Ok(true)
     }
 
     /// The state resolution v2 **auth difference** of `state_maps`:
