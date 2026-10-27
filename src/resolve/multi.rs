@@ -451,9 +451,11 @@ where
     )
 }
 
-/// Resolves parent state maps and returns the result with the original set of
-/// conflicted keys. Versions after V1 also resolve auth-difference events;
-/// unconflicted values take precedence in the final result.
+/// Resolves parent state maps and returns the result with the candidate keys
+/// for diffing: the genuinely conflicted slots plus any auth-difference and
+/// V2.1+ subgraph supplemental events. Versions after V1 also resolve
+/// auth-difference events; unconflicted values take precedence in the final
+/// result.
 ///
 /// # Panics
 /// Panics for empty input, a missing conflicted event, a missing unconflicted
@@ -618,8 +620,11 @@ where
 /// type. Rezzy still materializes the resolved `SharedState` internally in
 /// order to perform resolution; this API avoids making callers retain or
 /// rebuild that full map at the persistence boundary. Because the baseline is
-/// an input fork, the final diff only examines the genuinely conflicted
-/// state-key slots.
+/// an input fork, the diff examines keys from genuinely conflicted state-key
+/// slots together with supplemental auth-difference and subgraph candidates.
+/// Supplemental candidates can introduce keys absent from every input map;
+/// the returned diff still contains only keys whose value differs between
+/// the selected baseline and the resolved state.
 ///
 /// `empty_key` is passed explicitly because [`StateKey`] does not require a
 /// default value. It is used for state events whose `state_key` is absent.
