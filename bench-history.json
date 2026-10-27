@@ -1,0 +1,1475 @@
+{
+  "S=1024: db/cumulative_rebuild: LtHash            cumulative": [
+    0.951
+  ],
+  "S=1024: db/cumulative_rebuild: conduwuit-style   cumulative": [
+    98.042
+  ],
+  "S=1024: db/cumulative_rebuild: synapse-style hash cumulative": [
+    79.844
+  ],
+  "S=16: db/cumulative_rebuild: LtHash            cumulative": [
+    0.017
+  ],
+  "S=16: db/cumulative_rebuild: conduwuit-style   cumulative": [
+    0.031
+  ],
+  "S=16: db/cumulative_rebuild: synapse-style hash cumulative": [
+    0.025
+  ],
+  "S=1: math/lthash_comprehensive: XOF expansion": [
+    0.0004126
+  ],
+  "S=1: math/lthash_comprehensive: add_lattice (x2)": [
+    7.99e-05
+  ],
+  "S=1: math/lthash_comprehensive: batch insert [   1]": [
+    5.34e-05
+  ],
+  "S=1: math/lthash_comprehensive: batch insert [   2]": [
+    0.0001042
+  ],
+  "S=1: math/lthash_comprehensive: batch insert [   4]": [
+    0.0002097
+  ],
+  "S=1: math/lthash_comprehensive: batch insert [   8]": [
+    0.0004992
+  ],
+  "S=1: math/lthash_comprehensive: batch insert [  16]": [
+    0.0008737
+  ],
+  "S=1: math/lthash_comprehensive: batch remove [   1]": [
+    6.13e-05
+  ],
+  "S=1: math/lthash_comprehensive: batch remove [   2]": [
+    0.00012880000000000001
+  ],
+  "S=1: math/lthash_comprehensive: batch remove [   4]": [
+    0.0002474
+  ],
+  "S=1: math/lthash_comprehensive: batch remove [   8]": [
+    0.00048439999999999996
+  ],
+  "S=1: math/lthash_comprehensive: collapse": [
+    0.0009111
+  ],
+  "S=1: math/lthash_comprehensive: from_state [ 2048]": [
+    1.61
+  ],
+  "S=1: math/lthash_comprehensive: from_state [ 4096]": [
+    3.26
+  ],
+  "S=1: math/lthash_comprehensive: from_state [ 8192]": [
+    6.47
+  ],
+  "S=1: math/lthash_comprehensive: from_state [16384]": [
+    12.84
+  ],
+  "S=1: math/lthash_comprehensive: incremental   [ 2048]": [
+    1.55
+  ],
+  "S=1: math/lthash_comprehensive: incremental   [ 4096]": [
+    3.12
+  ],
+  "S=1: math/lthash_comprehensive: incremental   [ 8192]": [
+    6.31
+  ],
+  "S=1: math/lthash_comprehensive: incremental   [16384]": [
+    12.63
+  ],
+  "S=1: math/lthash_comprehensive: insert()": [
+    0.0007194
+  ],
+  "S=1: math/lthash_comprehensive: remove()": [
+    0.000713
+  ],
+  "S=1: math/lthash_comprehensive: seed()": [
+    0.0006526
+  ],
+  "S=1: math/lthash_comprehensive: sub_lattice (x2)": [
+    8.340000000000001e-05
+  ],
+  "S=2048: db/cumulative_rebuild: LtHash            cumulative": [
+    2.523
+  ],
+  "S=2048: db/cumulative_rebuild: conduwuit-style   cumulative": [
+    399.953
+  ],
+  "S=2048: db/cumulative_rebuild: synapse-style hash cumulative": [
+    319.586
+  ],
+  "S=256: db/cumulative_rebuild: LtHash            cumulative": [
+    0.239
+  ],
+  "S=256: db/cumulative_rebuild: conduwuit-style   cumulative": [
+    6.217
+  ],
+  "S=256: db/cumulative_rebuild: synapse-style hash cumulative": [
+    5.185
+  ],
+  "S=2: math/lthash_backends: expand (large) blake3+blake3": [
+    0.0007723
+  ],
+  "S=2: math/lthash_backends: expand (large) shake+blake2": [
+    0.0078335
+  ],
+  "S=2: math/lthash_backends: expand (medium) blake3+blake3": [
+    0.0004614
+  ],
+  "S=2: math/lthash_backends: expand (medium) shake+blake2": [
+    0.0066905
+  ],
+  "S=2: math/lthash_backends: expand (small) blake3+blake3": [
+    0.00040919999999999997
+  ],
+  "S=2: math/lthash_backends: expand (small) shake+blake2": [
+    0.0066823
+  ],
+  "S=2: math/lthash_comprehensive: XOF expansion": [
+    0.0004671
+  ],
+  "S=2: math/lthash_comprehensive: add_lattice (x2)": [
+    7.99e-05
+  ],
+  "S=2: math/lthash_comprehensive: batch insert [   1]": [
+    5.55e-05
+  ],
+  "S=2: math/lthash_comprehensive: batch insert [   2]": [
+    0.0001099
+  ],
+  "S=2: math/lthash_comprehensive: batch insert [   4]": [
+    0.0001789
+  ],
+  "S=2: math/lthash_comprehensive: batch insert [   8]": [
+    0.00048439999999999996
+  ],
+  "S=2: math/lthash_comprehensive: batch insert [  16]": [
+    0.0007268
+  ],
+  "S=2: math/lthash_comprehensive: batch remove [   1]": [
+    5.15e-05
+  ],
+  "S=2: math/lthash_comprehensive: batch remove [   2]": [
+    0.0001068
+  ],
+  "S=2: math/lthash_comprehensive: batch remove [   4]": [
+    0.000202
+  ],
+  "S=2: math/lthash_comprehensive: batch remove [   8]": [
+    0.000418
+  ],
+  "S=2: math/lthash_comprehensive: batch remove [  16]": [
+    0.0009832
+  ],
+  "S=2: math/lthash_comprehensive: collapse": [
+    0.000911
+  ],
+  "S=2: math/lthash_comprehensive: from_state [ 2048]": [
+    1.6
+  ],
+  "S=2: math/lthash_comprehensive: from_state [ 4096]": [
+    3.32
+  ],
+  "S=2: math/lthash_comprehensive: from_state [ 8192]": [
+    6.79
+  ],
+  "S=2: math/lthash_comprehensive: from_state [16384]": [
+    13.14
+  ],
+  "S=2: math/lthash_comprehensive: incremental   [ 2048]": [
+    1.55
+  ],
+  "S=2: math/lthash_comprehensive: incremental   [ 4096]": [
+    3.13
+  ],
+  "S=2: math/lthash_comprehensive: incremental   [ 8192]": [
+    6.44
+  ],
+  "S=2: math/lthash_comprehensive: incremental   [16384]": [
+    12.81
+  ],
+  "S=2: math/lthash_comprehensive: insert()": [
+    0.0007668999999999999
+  ],
+  "S=2: math/lthash_comprehensive: remove()": [
+    0.0007692
+  ],
+  "S=2: math/lthash_comprehensive: seed()": [
+    0.0006967999999999999
+  ],
+  "S=2: math/lthash_comprehensive: sub_lattice (x2)": [
+    7.91e-05
+  ],
+  "S=3: math/lthash_backends: collapse blake3+blake3": [
+    0.0009149
+  ],
+  "S=3: math/lthash_backends: collapse shake+blake2": [
+    0.0024819
+  ],
+  "S=3: math/lthash_comprehensive: XOF expansion": [
+    0.0007861
+  ],
+  "S=3: math/lthash_comprehensive: add_lattice (x2)": [
+    8.14e-05
+  ],
+  "S=3: math/lthash_comprehensive: batch insert [   1]": [
+    4.96e-05
+  ],
+  "S=3: math/lthash_comprehensive: batch insert [   2]": [
+    0.0001158
+  ],
+  "S=3: math/lthash_comprehensive: batch insert [   4]": [
+    0.0002281
+  ],
+  "S=3: math/lthash_comprehensive: batch insert [   8]": [
+    0.0005394
+  ],
+  "S=3: math/lthash_comprehensive: batch insert [  16]": [
+    0.0009246
+  ],
+  "S=3: math/lthash_comprehensive: batch remove [   1]": [
+    6.670000000000001e-05
+  ],
+  "S=3: math/lthash_comprehensive: batch remove [   2]": [
+    0.0001373
+  ],
+  "S=3: math/lthash_comprehensive: batch remove [   4]": [
+    0.00026139999999999996
+  ],
+  "S=3: math/lthash_comprehensive: batch remove [   8]": [
+    0.0005189
+  ],
+  "S=3: math/lthash_comprehensive: collapse": [
+    0.0009092999999999999
+  ],
+  "S=3: math/lthash_comprehensive: from_state [ 1024]": [
+    1.13
+  ],
+  "S=3: math/lthash_comprehensive: from_state [ 2048]": [
+    2.34
+  ],
+  "S=3: math/lthash_comprehensive: from_state [ 4096]": [
+    4.69
+  ],
+  "S=3: math/lthash_comprehensive: from_state [ 8192]": [
+    9.44
+  ],
+  "S=3: math/lthash_comprehensive: from_state [16384]": [
+    18.69
+  ],
+  "S=3: math/lthash_comprehensive: incremental   [ 1024]": [
+    1.11
+  ],
+  "S=3: math/lthash_comprehensive: incremental   [ 2048]": [
+    2.25
+  ],
+  "S=3: math/lthash_comprehensive: incremental   [ 4096]": [
+    4.56
+  ],
+  "S=3: math/lthash_comprehensive: incremental   [ 8192]": [
+    9.34
+  ],
+  "S=3: math/lthash_comprehensive: incremental   [16384]": [
+    18.3
+  ],
+  "S=3: math/lthash_comprehensive: sub_lattice (x2)": [
+    8.22e-05
+  ],
+  "S=4096: db/cumulative_rebuild: LtHash            cumulative": [
+    8.198
+  ],
+  "S=4096: db/cumulative_rebuild: conduwuit-style   cumulative": [
+    1718.123
+  ],
+  "S=4096: db/cumulative_rebuild: synapse-style hash cumulative": [
+    1516.815
+  ],
+  "S=4: math/lthash_backends: insert blake3+blake3": [
+    0.0005045
+  ],
+  "S=4: math/lthash_backends: insert shake+blake2": [
+    0.0067128000000000005
+  ],
+  "S=4: math/lthash_comprehensive: add_lattice (x2)": [
+    8.02e-05
+  ],
+  "S=4: math/lthash_comprehensive: batch insert [   1]": [
+    5.0799999999999995e-05
+  ],
+  "S=4: math/lthash_comprehensive: batch insert [   2]": [
+    0.0001053
+  ],
+  "S=4: math/lthash_comprehensive: batch insert [   4]": [
+    0.0002097
+  ],
+  "S=4: math/lthash_comprehensive: batch insert [   8]": [
+    0.0004776
+  ],
+  "S=4: math/lthash_comprehensive: batch insert [  16]": [
+    0.0008198999999999999
+  ],
+  "S=4: math/lthash_comprehensive: batch remove [   1]": [
+    5.3200000000000006e-05
+  ],
+  "S=4: math/lthash_comprehensive: batch remove [   2]": [
+    0.00010740000000000001
+  ],
+  "S=4: math/lthash_comprehensive: batch remove [   4]": [
+    0.000209
+  ],
+  "S=4: math/lthash_comprehensive: batch remove [   8]": [
+    0.000425
+  ],
+  "S=4: math/lthash_comprehensive: collapse": [
+    0.0009081
+  ],
+  "S=4: math/lthash_comprehensive: from_state [  128]": [
+    1.91
+  ],
+  "S=4: math/lthash_comprehensive: from_state [  256]": [
+    4.18
+  ],
+  "S=4: math/lthash_comprehensive: from_state [  512]": [
+    8.66
+  ],
+  "S=4: math/lthash_comprehensive: from_state [ 1024]": [
+    17.41
+  ],
+  "S=4: math/lthash_comprehensive: incremental   [  128]": [
+    1.93
+  ],
+  "S=4: math/lthash_comprehensive: incremental   [  256]": [
+    4.11
+  ],
+  "S=4: math/lthash_comprehensive: incremental   [  512]": [
+    8.59
+  ],
+  "S=4: math/lthash_comprehensive: incremental   [ 1024]": [
+    17.19
+  ],
+  "S=4: math/lthash_comprehensive: sub_lattice (x2)": [
+    7.95e-05
+  ],
+  "S=5: math/lthash_backends: build (n=1024) blake3+blake3": [
+    0.523
+  ],
+  "S=5: math/lthash_backends: build (n=1024) shake+blake2": [
+    6.885
+  ],
+  "S=5: math/lthash_backends: build (n=64) blake3+blake3": [
+    0.033
+  ],
+  "S=5: math/lthash_backends: build (n=64) shake+blake2": [
+    0.433
+  ],
+  "S=5: math/lthash_backends: build (n=8192) blake3+blake3": [
+    4.264
+  ],
+  "S=5: math/lthash_backends: build (n=8192) shake+blake2": [
+    55.35
+  ],
+  "S=64: db/cumulative_rebuild: LtHash            cumulative": [
+    0.065
+  ],
+  "S=64: db/cumulative_rebuild: conduwuit-style   cumulative": [
+    0.432
+  ],
+  "S=64: db/cumulative_rebuild: synapse-style hash cumulative": [
+    0.392
+  ],
+  "S=6: math/lthash_backends: mutate (n=4096) blake3+blake3": [
+    0.001836
+  ],
+  "S=6: math/lthash_backends: mutate (n=4096) shake+blake2": [
+    0.0116542
+  ],
+  "S=7: math/lthash_backends: expand (large) aes-ctr-ni": [
+    0.0008497
+  ],
+  "S=7: math/lthash_backends: expand (large) aes-ctr-portable": [
+    0.0095479
+  ],
+  "S=7: math/lthash_backends: expand (large) blake3": [
+    0.0007358999999999999
+  ],
+  "S=7: math/lthash_backends: expand (large) sha512-ctr": [
+    0.012099200000000001
+  ],
+  "S=7: math/lthash_backends: expand (large) shake256": [
+    0.0078284
+  ],
+  "S=7: math/lthash_backends: expand (medium) aes-ctr-ni": [
+    0.0005353
+  ],
+  "S=7: math/lthash_backends: expand (medium) aes-ctr-portable": [
+    0.009188700000000001
+  ],
+  "S=7: math/lthash_backends: expand (medium) blake3": [
+    0.00041
+  ],
+  "S=7: math/lthash_backends: expand (medium) sha512-ctr": [
+    0.0110858
+  ],
+  "S=7: math/lthash_backends: expand (medium) shake256": [
+    0.0066568999999999994
+  ],
+  "S=7: math/lthash_backends: expand (small) aes-ctr-ni": [
+    0.0004787
+  ],
+  "S=7: math/lthash_backends: expand (small) aes-ctr-portable": [
+    0.0091068
+  ],
+  "S=7: math/lthash_backends: expand (small) blake3": [
+    0.0003647
+  ],
+  "S=7: math/lthash_backends: expand (small) sha512-ctr": [
+    0.011064200000000001
+  ],
+  "S=7: math/lthash_backends: expand (small) shake256": [
+    0.0066539
+  ],
+  "S=8: math/lthash_backends: build (n=1024) aes-ctr-ni": [
+    0.607
+  ],
+  "S=8: math/lthash_backends: build (n=1024) aes-ctr-portable": [
+    9.454
+  ],
+  "S=8: math/lthash_backends: build (n=1024) blake3": [
+    0.482
+  ],
+  "S=8: math/lthash_backends: build (n=1024) sha512-ctr": [
+    11.519
+  ],
+  "S=8: math/lthash_backends: build (n=1024) shake256": [
+    6.885
+  ],
+  "db/hamt_delta: disk, 0 cached layers (n=131072, d=1)": [
+    0.957
+  ],
+  "db/hamt_delta: disk, 0 cached layers (n=131072, d=10)": [
+    6.678
+  ],
+  "db/hamt_delta: disk, 0 cached layers (n=131072, d=100)": [
+    60.127
+  ],
+  "db/hamt_delta: disk, 0 cached layers (n=16384, d=1)": [
+    0.511
+  ],
+  "db/hamt_delta: disk, 0 cached layers (n=16384, d=10)": [
+    4.013
+  ],
+  "db/hamt_delta: disk, 0 cached layers (n=16384, d=100)": [
+    37.814
+  ],
+  "db/hamt_delta: disk, 1 cached layers (n=131072, d=1)": [
+    0.583
+  ],
+  "db/hamt_delta: disk, 1 cached layers (n=131072, d=10)": [
+    4.807
+  ],
+  "db/hamt_delta: disk, 1 cached layers (n=131072, d=100)": [
+    50.831
+  ],
+  "db/hamt_delta: disk, 1 cached layers (n=16384, d=1)": [
+    0.295
+  ],
+  "db/hamt_delta: disk, 1 cached layers (n=16384, d=10)": [
+    2.64
+  ],
+  "db/hamt_delta: disk, 1 cached layers (n=16384, d=100)": [
+    29.239
+  ],
+  "db/hamt_delta: disk, 2 cached layers (n=131072, d=1)": [
+    0.294
+  ],
+  "db/hamt_delta: disk, 2 cached layers (n=131072, d=10)": [
+    2.535
+  ],
+  "db/hamt_delta: disk, 2 cached layers (n=131072, d=100)": [
+    28.024
+  ],
+  "db/hamt_delta: disk, 2 cached layers (n=16384, d=1)": [
+    0.004
+  ],
+  "db/hamt_delta: disk, 2 cached layers (n=16384, d=10)": [
+    0.494
+  ],
+  "db/hamt_delta: disk, 2 cached layers (n=16384, d=100)": [
+    7.411
+  ],
+  "db/hamt_delta: disk, 3 cached layers (n=131072, d=1)": [
+    0.001
+  ],
+  "db/hamt_delta: disk, 3 cached layers (n=131072, d=10)": [
+    0.404
+  ],
+  "db/hamt_delta: disk, 3 cached layers (n=131072, d=100)": [
+    3.311
+  ],
+  "db/hamt_delta: disk, 3 cached layers (n=16384, d=1)": [
+    0.001
+  ],
+  "db/hamt_delta: disk, 3 cached layers (n=16384, d=10)": [
+    0.026
+  ],
+  "db/hamt_delta: disk, 3 cached layers (n=16384, d=100)": [
+    0.406
+  ],
+  "db/hamt_delta: disk, 4 cached layers (n=131072, d=1)": [
+    0.001
+  ],
+  "db/hamt_delta: disk, 4 cached layers (n=131072, d=10)": [
+    0.007
+  ],
+  "db/hamt_delta: disk, 4 cached layers (n=131072, d=100)": [
+    0.316
+  ],
+  "db/hamt_delta: disk, 4 cached layers (n=16384, d=1)": [
+    0.001
+  ],
+  "db/hamt_delta: disk, 4 cached layers (n=16384, d=10)": [
+    0.005
+  ],
+  "db/hamt_delta: disk, 4 cached layers (n=16384, d=100)": [
+    0.04
+  ],
+  "db/hamt_delta: disk, 5 cached layers (n=131072, d=1)": [
+    0.001
+  ],
+  "db/hamt_delta: disk, 5 cached layers (n=131072, d=10)": [
+    0.007
+  ],
+  "db/hamt_delta: disk, 5 cached layers (n=131072, d=100)": [
+    0.11
+  ],
+  "db/hamt_delta: disk, 5 cached layers (n=16384, d=1)": [
+    0.001
+  ],
+  "db/hamt_delta: disk, 5 cached layers (n=16384, d=10)": [
+    0.005
+  ],
+  "db/hamt_delta: disk, 5 cached layers (n=16384, d=100)": [
+    0.039
+  ],
+  "db/hamt_delta: disk, 6 cached layers (n=131072, d=1)": [
+    0.001
+  ],
+  "db/hamt_delta: disk, 6 cached layers (n=131072, d=10)": [
+    0.007
+  ],
+  "db/hamt_delta: disk, 6 cached layers (n=131072, d=100)": [
+    0.108
+  ],
+  "db/hamt_delta: in-memory (n=1024, d=1)": [
+    0.000606
+  ],
+  "db/hamt_delta: in-memory (n=1024, d=10)": [
+    0.002988
+  ],
+  "db/hamt_delta: in-memory (n=1024, d=100)": [
+    0.021064
+  ],
+  "db/hamt_delta: in-memory (n=131072, d=1)": [
+    0.000975
+  ],
+  "db/hamt_delta: in-memory (n=131072, d=10)": [
+    0.007268
+  ],
+  "db/hamt_delta: in-memory (n=131072, d=100)": [
+    0.104072
+  ],
+  "db/hamt_delta: in-memory (n=16384, d=1)": [
+    0.000784
+  ],
+  "db/hamt_delta: in-memory (n=16384, d=10)": [
+    0.004898
+  ],
+  "db/hamt_delta: in-memory (n=16384, d=100)": [
+    0.041528
+  ],
+  "db/hamt_delta: isolate_delta in-memory (n=1024, d=1)": [
+    0.000602
+  ],
+  "db/hamt_delta: isolate_delta in-memory (n=1024, d=10)": [
+    0.002951
+  ],
+  "db/hamt_delta: isolate_delta in-memory (n=1024, d=100)": [
+    0.021484
+  ],
+  "db/hamt_delta: isolate_delta in-memory (n=131072, d=1)": [
+    0.000931
+  ],
+  "db/hamt_delta: isolate_delta in-memory (n=131072, d=10)": [
+    0.007014
+  ],
+  "db/hamt_delta: isolate_delta in-memory (n=131072, d=100)": [
+    0.103676
+  ],
+  "db/hamt_delta: isolate_delta in-memory (n=16384, d=1)": [
+    0.00076
+  ],
+  "db/hamt_delta: isolate_delta in-memory (n=16384, d=10)": [
+    0.004731
+  ],
+  "db/hamt_delta: isolate_delta in-memory (n=16384, d=100)": [
+    0.040531
+  ],
+  "db/hamt_delta: ram-store, 0 cached layers (n=1024, d=1)": [
+    0.000907
+  ],
+  "db/hamt_delta: ram-store, 0 cached layers (n=1024, d=10)": [
+    0.003704
+  ],
+  "db/hamt_delta: ram-store, 0 cached layers (n=1024, d=100)": [
+    0.025716
+  ],
+  "db/hamt_delta: ram-store, 0 cached layers (n=131072, d=1)": [
+    0.00104
+  ],
+  "db/hamt_delta: ram-store, 0 cached layers (n=131072, d=10)": [
+    0.008222
+  ],
+  "db/hamt_delta: ram-store, 0 cached layers (n=131072, d=100)": [
+    0.075799
+  ],
+  "db/hamt_delta: ram-store, 0 cached layers (n=16384, d=1)": [
+    0.000872
+  ],
+  "db/hamt_delta: ram-store, 0 cached layers (n=16384, d=10)": [
+    0.006039
+  ],
+  "db/hamt_delta: ram-store, 0 cached layers (n=16384, d=100)": [
+    0.046805
+  ],
+  "db/hamt_delta: ram-store, 1 cached layers (n=1024, d=1)": [
+    0.000685
+  ],
+  "db/hamt_delta: ram-store, 1 cached layers (n=1024, d=10)": [
+    0.003397
+  ],
+  "db/hamt_delta: ram-store, 1 cached layers (n=1024, d=100)": [
+    0.02382
+  ],
+  "db/hamt_delta: ram-store, 1 cached layers (n=131072, d=1)": [
+    0.001026
+  ],
+  "db/hamt_delta: ram-store, 1 cached layers (n=131072, d=10)": [
+    0.007883
+  ],
+  "db/hamt_delta: ram-store, 1 cached layers (n=131072, d=100)": [
+    0.074823
+  ],
+  "db/hamt_delta: ram-store, 1 cached layers (n=16384, d=1)": [
+    0.000839
+  ],
+  "db/hamt_delta: ram-store, 1 cached layers (n=16384, d=10)": [
+    0.00566
+  ],
+  "db/hamt_delta: ram-store, 1 cached layers (n=16384, d=100)": [
+    0.044974
+  ],
+  "db/hamt_delta: ram-store, 2 cached layers (n=1024, d=1)": [
+    0.000665
+  ],
+  "db/hamt_delta: ram-store, 2 cached layers (n=1024, d=10)": [
+    0.002928
+  ],
+  "db/hamt_delta: ram-store, 2 cached layers (n=1024, d=100)": [
+    0.020553
+  ],
+  "db/hamt_delta: ram-store, 2 cached layers (n=131072, d=1)": [
+    0.000966
+  ],
+  "db/hamt_delta: ram-store, 2 cached layers (n=131072, d=10)": [
+    0.007241
+  ],
+  "db/hamt_delta: ram-store, 2 cached layers (n=131072, d=100)": [
+    0.075406
+  ],
+  "db/hamt_delta: ram-store, 2 cached layers (n=16384, d=1)": [
+    0.000789
+  ],
+  "db/hamt_delta: ram-store, 2 cached layers (n=16384, d=10)": [
+    0.005106
+  ],
+  "db/hamt_delta: ram-store, 2 cached layers (n=16384, d=100)": [
+    0.040533
+  ],
+  "db/hamt_delta: ram-store, 3 cached layers (n=1024, d=1)": [
+    0.00058
+  ],
+  "db/hamt_delta: ram-store, 3 cached layers (n=1024, d=10)": [
+    0.003027
+  ],
+  "db/hamt_delta: ram-store, 3 cached layers (n=1024, d=100)": [
+    0.020477
+  ],
+  "db/hamt_delta: ram-store, 3 cached layers (n=131072, d=1)": [
+    0.000926
+  ],
+  "db/hamt_delta: ram-store, 3 cached layers (n=131072, d=10)": [
+    0.006828
+  ],
+  "db/hamt_delta: ram-store, 3 cached layers (n=131072, d=100)": [
+    0.117617
+  ],
+  "db/hamt_delta: ram-store, 3 cached layers (n=16384, d=1)": [
+    0.000749
+  ],
+  "db/hamt_delta: ram-store, 3 cached layers (n=16384, d=10)": [
+    0.004848
+  ],
+  "db/hamt_delta: ram-store, 3 cached layers (n=16384, d=100)": [
+    0.040185
+  ],
+  "db/hamt_delta: ram-store, 4 cached layers (n=131072, d=1)": [
+    0.000916
+  ],
+  "db/hamt_delta: ram-store, 4 cached layers (n=131072, d=10)": [
+    0.006758
+  ],
+  "db/hamt_delta: ram-store, 4 cached layers (n=131072, d=100)": [
+    0.113368
+  ],
+  "db/hamt_delta: ram-store, 4 cached layers (n=16384, d=1)": [
+    0.000736
+  ],
+  "db/hamt_delta: ram-store, 4 cached layers (n=16384, d=10)": [
+    0.004831
+  ],
+  "db/hamt_delta: ram-store, 4 cached layers (n=16384, d=100)": [
+    0.040517
+  ],
+  "db/hamt_delta: ram-store, 5 cached layers (n=131072, d=1)": [
+    0.000922
+  ],
+  "db/hamt_delta: ram-store, 5 cached layers (n=131072, d=10)": [
+    0.006813
+  ],
+  "db/hamt_delta: ram-store, 5 cached layers (n=131072, d=100)": [
+    0.112066
+  ],
+  "db/hamt_delta: ram-store, 5 cached layers (n=16384, d=1)": [
+    0.000735
+  ],
+  "db/hamt_delta: ram-store, 5 cached layers (n=16384, d=10)": [
+    0.004756
+  ],
+  "db/hamt_delta: ram-store, 5 cached layers (n=16384, d=100)": [
+    0.03968
+  ],
+  "db/hamt_delta: ram-store, 6 cached layers (n=131072, d=1)": [
+    0.000929
+  ],
+  "db/hamt_delta: ram-store, 6 cached layers (n=131072, d=10)": [
+    0.006738
+  ],
+  "db/hamt_delta: ram-store, 6 cached layers (n=131072, d=100)": [
+    0.113026
+  ],
+  "db/state_backend: OrdMap fork+diverge (n=1024)": [
+    0.000351
+  ],
+  "db/state_backend: OrdMap fork+diverge (n=128)": [
+    0.000311
+  ],
+  "db/state_backend: OrdMap fork+diverge (n=131072)": [
+    0.000746
+  ],
+  "db/state_backend: OrdMap fork+diverge (n=16)": [
+    0.000293
+  ],
+  "db/state_backend: OrdMap fork+diverge (n=16384)": [
+    0.000444
+  ],
+  "db/state_backend: OrdMap fork+diverge (n=65536)": [
+    0.000556
+  ],
+  "db/state_backend: OrdMap fork+diverge (n=8192)": [
+    0.000443
+  ],
+  "db/state_backend: OrdMap state hash (n=1024)": [
+    0.10022
+  ],
+  "db/state_backend: OrdMap state hash (n=128)": [
+    0.013532
+  ],
+  "db/state_backend: OrdMap state hash (n=131072)": [
+    32.375253
+  ],
+  "db/state_backend: OrdMap state hash (n=16)": [
+    0.002136
+  ],
+  "db/state_backend: OrdMap state hash (n=16384)": [
+    2.163572
+  ],
+  "db/state_backend: OrdMap state hash (n=65536)": [
+    15.40603
+  ],
+  "db/state_backend: OrdMap state hash (n=8192)": [
+    0.967872
+  ],
+  "db/state_backend: OrdMap::diff (n=1024)": [
+    0.001525
+  ],
+  "db/state_backend: OrdMap::diff (n=128)": [
+    0.002164
+  ],
+  "db/state_backend: OrdMap::diff (n=131072)": [
+    0.002539
+  ],
+  "db/state_backend: OrdMap::diff (n=16)": [
+    0.00119
+  ],
+  "db/state_backend: OrdMap::diff (n=16384)": [
+    0.002001
+  ],
+  "db/state_backend: OrdMap::diff (n=65536)": [
+    0.002224
+  ],
+  "db/state_backend: OrdMap::diff (n=8192)": [
+    0.001965
+  ],
+  "db/state_backend: OrdMap::from_iter (n=1024)": [
+    0.305156
+  ],
+  "db/state_backend: OrdMap::from_iter (n=128)": [
+    0.029771
+  ],
+  "db/state_backend: OrdMap::from_iter (n=131072)": [
+    165.669354
+  ],
+  "db/state_backend: OrdMap::from_iter (n=16)": [
+    0.002673
+  ],
+  "db/state_backend: OrdMap::from_iter (n=16384)": [
+    9.333958
+  ],
+  "db/state_backend: OrdMap::from_iter (n=65536)": [
+    65.630539
+  ],
+  "db/state_backend: OrdMap::from_iter (n=8192)": [
+    3.6728
+  ],
+  "db/state_backend: OrdMap::get (n=1024)": [
+    0.000128
+  ],
+  "db/state_backend: OrdMap::get (n=128)": [
+    8.7e-05
+  ],
+  "db/state_backend: OrdMap::get (n=131072)": [
+    0.000669
+  ],
+  "db/state_backend: OrdMap::get (n=16)": [
+    5.1e-05
+  ],
+  "db/state_backend: OrdMap::get (n=16384)": [
+    0.000334
+  ],
+  "db/state_backend: OrdMap::get (n=65536)": [
+    0.000528
+  ],
+  "db/state_backend: OrdMap::get (n=8192)": [
+    0.000275
+  ],
+  "db/state_backend: OrdMap::remove (fresh clone each op) (n=1024)": [
+    0.001647
+  ],
+  "db/state_backend: OrdMap::remove (fresh clone each op) (n=128)": [
+    0.001877
+  ],
+  "db/state_backend: OrdMap::remove (fresh clone each op) (n=131072)": [
+    0.00682
+  ],
+  "db/state_backend: OrdMap::remove (fresh clone each op) (n=16)": [
+    0.001357
+  ],
+  "db/state_backend: OrdMap::remove (fresh clone each op) (n=16384)": [
+    0.003619
+  ],
+  "db/state_backend: OrdMap::remove (fresh clone each op) (n=65536)": [
+    0.005214
+  ],
+  "db/state_backend: OrdMap::remove (fresh clone each op) (n=8192)": [
+    0.003092
+  ],
+  "db/state_backend: OrdMap::update (fresh clone each op) (n=1024)": [
+    0.001265
+  ],
+  "db/state_backend: OrdMap::update (fresh clone each op) (n=128)": [
+    0.000798
+  ],
+  "db/state_backend: OrdMap::update (fresh clone each op) (n=131072)": [
+    0.003403
+  ],
+  "db/state_backend: OrdMap::update (fresh clone each op) (n=16)": [
+    0.00083
+  ],
+  "db/state_backend: OrdMap::update (fresh clone each op) (n=16384)": [
+    0.002116
+  ],
+  "db/state_backend: OrdMap::update (fresh clone each op) (n=65536)": [
+    0.002867
+  ],
+  "db/state_backend: OrdMap::update (fresh clone each op) (n=8192)": [
+    0.002238
+  ],
+  "db/state_backend: PersistentOrdMap fork+diverge (n=1024)": [
+    0.000457
+  ],
+  "db/state_backend: PersistentOrdMap fork+diverge (n=128)": [
+    0.00037
+  ],
+  "db/state_backend: PersistentOrdMap fork+diverge (n=131072)": [
+    0.001026
+  ],
+  "db/state_backend: PersistentOrdMap fork+diverge (n=16)": [
+    0.000273
+  ],
+  "db/state_backend: PersistentOrdMap fork+diverge (n=16384)": [
+    0.000571
+  ],
+  "db/state_backend: PersistentOrdMap fork+diverge (n=65536)": [
+    0.000739
+  ],
+  "db/state_backend: PersistentOrdMap fork+diverge (n=8192)": [
+    0.000558
+  ],
+  "db/state_backend: PersistentOrdMap state hash (n=1024)": [
+    0.099269
+  ],
+  "db/state_backend: PersistentOrdMap state hash (n=128)": [
+    0.013616
+  ],
+  "db/state_backend: PersistentOrdMap state hash (n=131072)": [
+    26.591956
+  ],
+  "db/state_backend: PersistentOrdMap state hash (n=16)": [
+    0.001792
+  ],
+  "db/state_backend: PersistentOrdMap state hash (n=16384)": [
+    1.850261
+  ],
+  "db/state_backend: PersistentOrdMap state hash (n=65536)": [
+    12.354614
+  ],
+  "db/state_backend: PersistentOrdMap state hash (n=8192)": [
+    0.846501
+  ],
+  "db/state_backend: PersistentOrdMap::diff (n=1024)": [
+    0.002382
+  ],
+  "db/state_backend: PersistentOrdMap::diff (n=128)": [
+    0.002517
+  ],
+  "db/state_backend: PersistentOrdMap::diff (n=131072)": [
+    0.002484
+  ],
+  "db/state_backend: PersistentOrdMap::diff (n=16)": [
+    0.001985
+  ],
+  "db/state_backend: PersistentOrdMap::diff (n=16384)": [
+    0.002289
+  ],
+  "db/state_backend: PersistentOrdMap::diff (n=65536)": [
+    0.002323
+  ],
+  "db/state_backend: PersistentOrdMap::diff (n=8192)": [
+    0.00225
+  ],
+  "db/state_backend: PersistentOrdMap::from_iter (n=1024)": [
+    0.228975
+  ],
+  "db/state_backend: PersistentOrdMap::from_iter (n=128)": [
+    0.022353
+  ],
+  "db/state_backend: PersistentOrdMap::from_iter (n=131072)": [
+    121.010484
+  ],
+  "db/state_backend: PersistentOrdMap::from_iter (n=16)": [
+    0.001822
+  ],
+  "db/state_backend: PersistentOrdMap::from_iter (n=16384)": [
+    5.865059
+  ],
+  "db/state_backend: PersistentOrdMap::from_iter (n=65536)": [
+    43.233078
+  ],
+  "db/state_backend: PersistentOrdMap::from_iter (n=8192)": [
+    2.52417
+  ],
+  "db/state_backend: PersistentOrdMap::get (n=1024)": [
+    0.000187
+  ],
+  "db/state_backend: PersistentOrdMap::get (n=128)": [
+    0.000134
+  ],
+  "db/state_backend: PersistentOrdMap::get (n=131072)": [
+    0.000983
+  ],
+  "db/state_backend: PersistentOrdMap::get (n=16)": [
+    6.7e-05
+  ],
+  "db/state_backend: PersistentOrdMap::get (n=16384)": [
+    0.000492
+  ],
+  "db/state_backend: PersistentOrdMap::get (n=65536)": [
+    0.000784
+  ],
+  "db/state_backend: PersistentOrdMap::get (n=8192)": [
+    0.000398
+  ],
+  "db/state_backend: PersistentOrdMap::remove (fresh clone each op) (n=1024)": [
+    0.002182
+  ],
+  "db/state_backend: PersistentOrdMap::remove (fresh clone each op) (n=128)": [
+    0.002223
+  ],
+  "db/state_backend: PersistentOrdMap::remove (fresh clone each op) (n=131072)": [
+    0.008581
+  ],
+  "db/state_backend: PersistentOrdMap::remove (fresh clone each op) (n=16)": [
+    0.001484
+  ],
+  "db/state_backend: PersistentOrdMap::remove (fresh clone each op) (n=16384)": [
+    0.004051
+  ],
+  "db/state_backend: PersistentOrdMap::remove (fresh clone each op) (n=65536)": [
+    0.006183
+  ],
+  "db/state_backend: PersistentOrdMap::remove (fresh clone each op) (n=8192)": [
+    0.003466
+  ],
+  "db/state_backend: PersistentOrdMap::update (fresh clone each op) (n=1024)": [
+    0.001904
+  ],
+  "db/state_backend: PersistentOrdMap::update (fresh clone each op) (n=128)": [
+    0.00105
+  ],
+  "db/state_backend: PersistentOrdMap::update (fresh clone each op) (n=131072)": [
+    0.005523
+  ],
+  "db/state_backend: PersistentOrdMap::update (fresh clone each op) (n=16)": [
+    0.00072
+  ],
+  "db/state_backend: PersistentOrdMap::update (fresh clone each op) (n=16384)": [
+    0.00257
+  ],
+  "db/state_backend: PersistentOrdMap::update (fresh clone each op) (n=65536)": [
+    0.004591
+  ],
+  "db/state_backend: PersistentOrdMap::update (fresh clone each op) (n=8192)": [
+    0.002401
+  ],
+  "db/state_backend: hamt fork+diverge (n=1024)": [
+    0.006685
+  ],
+  "db/state_backend: hamt fork+diverge (n=128)": [
+    0.004464
+  ],
+  "db/state_backend: hamt fork+diverge (n=131072)": [
+    0.012325
+  ],
+  "db/state_backend: hamt fork+diverge (n=16)": [
+    0.003617
+  ],
+  "db/state_backend: hamt fork+diverge (n=16384)": [
+    0.008466
+  ],
+  "db/state_backend: hamt fork+diverge (n=65536)": [
+    0.011552
+  ],
+  "db/state_backend: hamt fork+diverge (n=8192)": [
+    0.007328
+  ],
+  "db/state_backend: hamt::build_hamt (n=1024)": [
+    0.775953
+  ],
+  "db/state_backend: hamt::build_hamt (n=128)": [
+    0.085391
+  ],
+  "db/state_backend: hamt::build_hamt (n=131072)": [
+    165.936337
+  ],
+  "db/state_backend: hamt::build_hamt (n=16)": [
+    0.009564
+  ],
+  "db/state_backend: hamt::build_hamt (n=16384)": [
+    15.400064
+  ],
+  "db/state_backend: hamt::build_hamt (n=65536)": [
+    81.197771
+  ],
+  "db/state_backend: hamt::build_hamt (n=8192)": [
+    6.724849
+  ],
+  "db/state_backend: hamt::get (n=1024)": [
+    0.000262
+  ],
+  "db/state_backend: hamt::get (n=128)": [
+    0.000259
+  ],
+  "db/state_backend: hamt::get (n=131072)": [
+    0.000721
+  ],
+  "db/state_backend: hamt::get (n=16)": [
+    0.000222
+  ],
+  "db/state_backend: hamt::get (n=16384)": [
+    0.000383
+  ],
+  "db/state_backend: hamt::get (n=65536)": [
+    0.000579
+  ],
+  "db/state_backend: hamt::get (n=8192)": [
+    0.000368
+  ],
+  "db/state_backend: hamt::insert (path-copy from shared root) (n=1024)": [
+    0.00649
+  ],
+  "db/state_backend: hamt::insert (path-copy from shared root) (n=128)": [
+    0.004368
+  ],
+  "db/state_backend: hamt::insert (path-copy from shared root) (n=131072)": [
+    0.012157
+  ],
+  "db/state_backend: hamt::insert (path-copy from shared root) (n=16)": [
+    0.002671
+  ],
+  "db/state_backend: hamt::insert (path-copy from shared root) (n=16384)": [
+    0.008059
+  ],
+  "db/state_backend: hamt::insert (path-copy from shared root) (n=65536)": [
+    0.011187
+  ],
+  "db/state_backend: hamt::insert (path-copy from shared root) (n=8192)": [
+    0.006868
+  ],
+  "db/state_backend: hamt::remove (path-copy from shared root) (n=1024)": [
+    0.005697
+  ],
+  "db/state_backend: hamt::remove (path-copy from shared root) (n=128)": [
+    0.004493
+  ],
+  "db/state_backend: hamt::remove (path-copy from shared root) (n=131072)": [
+    0.011371
+  ],
+  "db/state_backend: hamt::remove (path-copy from shared root) (n=16)": [
+    0.004066
+  ],
+  "db/state_backend: hamt::remove (path-copy from shared root) (n=16384)": [
+    0.007536
+  ],
+  "db/state_backend: hamt::remove (path-copy from shared root) (n=65536)": [
+    0.010223
+  ],
+  "db/state_backend: hamt::remove (path-copy from shared root) (n=8192)": [
+    0.006569
+  ],
+  "math/filter_spillover: bloom/insert/1000": [
+    0.035155
+  ],
+  "math/filter_spillover: bloom/insert/10000": [
+    0.326802
+  ],
+  "math/filter_spillover: bloom/insert/100000": [
+    3.277061
+  ],
+  "math/filter_spillover: bloom/probe/1000": [
+    0.029407
+  ],
+  "math/filter_spillover: bloom/probe/10000": [
+    0.288503
+  ],
+  "math/filter_spillover: bloom/probe/100000": [
+    2.886984
+  ],
+  "math/filter_spillover: cqf/insert/1000": [
+    0.029034
+  ],
+  "math/filter_spillover: cqf/insert/10000": [
+    0.350759
+  ],
+  "math/filter_spillover: cqf/insert/100000": [
+    2.854419
+  ],
+  "math/filter_spillover: cqf/probe/1000": [
+    0.011771
+  ],
+  "math/filter_spillover: cqf/probe/10000": [
+    0.244146
+  ],
+  "math/filter_spillover: cqf/probe/100000": [
+    1.559576
+  ],
+  "math/filter_spillover: cuckoo/insert/1000": [
+    0.021017
+  ],
+  "math/filter_spillover: cuckoo/insert/10000": [
+    0.267814
+  ],
+  "math/filter_spillover: cuckoo/insert/100000": [
+    3.188034
+  ],
+  "math/filter_spillover: cuckoo/probe/1000": [
+    0.008823
+  ],
+  "math/filter_spillover: cuckoo/probe/10000": [
+    0.126119
+  ],
+  "math/filter_spillover: cuckoo/probe/100000": [
+    2.19359
+  ],
+  "math/filter_spillover: remainder_probe/insert/1000": [
+    0.034376
+  ],
+  "math/filter_spillover: remainder_probe/insert/10000": [
+    0.421656
+  ],
+  "math/filter_spillover: remainder_probe/insert/100000": [
+    4.375765
+  ],
+  "math/filter_spillover: remainder_probe/probe/1000": [
+    0.028488
+  ],
+  "math/filter_spillover: remainder_probe/probe/10000": [
+    0.3906
+  ],
+  "math/filter_spillover: remainder_probe/probe/100000": [
+    4.168628
+  ],
+  "math/lthash: LtHash (O(1), lattice add/sub + BLAKE3 digest) (n=1024)": [
+    0.0032711
+  ],
+  "math/lthash: LtHash (O(1), lattice add/sub + BLAKE3 digest) (n=128)": [
+    0.0032705
+  ],
+  "math/lthash: LtHash (O(1), lattice add/sub + BLAKE3 digest) (n=16)": [
+    0.0031681
+  ],
+  "math/lthash: LtHash (O(1), lattice add/sub + BLAKE3 digest) (n=16384)": [
+    0.0036165
+  ],
+  "math/lthash: LtHash (O(1), lattice add/sub + BLAKE3 digest) (n=2048)": [
+    0.0033771
+  ],
+  "math/lthash: LtHash (O(1), lattice add/sub + BLAKE3 digest) (n=256)": [
+    0.0031416
+  ],
+  "math/lthash: LtHash (O(1), lattice add/sub + BLAKE3 digest) (n=32)": [
+    0.0031404000000000002
+  ],
+  "math/lthash: LtHash (O(1), lattice add/sub + BLAKE3 digest) (n=32768)": [
+    0.0036795
+  ],
+  "math/lthash: LtHash (O(1), lattice add/sub + BLAKE3 digest) (n=4096)": [
+    0.0033938
+  ],
+  "math/lthash: LtHash (O(1), lattice add/sub + BLAKE3 digest) (n=512)": [
+    0.0032035
+  ],
+  "math/lthash: LtHash (O(1), lattice add/sub + BLAKE3 digest) (n=64)": [
+    0.0032298
+  ],
+  "math/lthash: LtHash (O(1), lattice add/sub + BLAKE3 digest) (n=65536)": [
+    0.0035743000000000003
+  ],
+  "math/lthash: LtHash (O(1), lattice add/sub + BLAKE3 digest) (n=8192)": [
+    0.0033810999999999997
+  ],
+  "math/lthash: conduwuit-style (O(S log S), sort + SHA-256 every step) (n=1024)": [
+    0.1885729
+  ],
+  "math/lthash: conduwuit-style (O(S log S), sort + SHA-256 every step) (n=128)": [
+    0.0363577
+  ],
+  "math/lthash: conduwuit-style (O(S log S), sort + SHA-256 every step) (n=16)": [
+    0.0188379
+  ],
+  "math/lthash: conduwuit-style (O(S log S), sort + SHA-256 every step) (n=16384)": [
+    4.2630285
+  ],
+  "math/lthash: conduwuit-style (O(S log S), sort + SHA-256 every step) (n=2048)": [
+    0.39861440000000004
+  ],
+  "math/lthash: conduwuit-style (O(S log S), sort + SHA-256 every step) (n=256)": [
+    0.0576505
+  ],
+  "math/lthash: conduwuit-style (O(S log S), sort + SHA-256 every step) (n=32)": [
+    0.0206029
+  ],
+  "math/lthash: conduwuit-style (O(S log S), sort + SHA-256 every step) (n=32768)": [
+    9.558583800000001
+  ],
+  "math/lthash: conduwuit-style (O(S log S), sort + SHA-256 every step) (n=4096)": [
+    0.7862121999999999
+  ],
+  "math/lthash: conduwuit-style (O(S log S), sort + SHA-256 every step) (n=512)": [
+    0.10147210000000001
+  ],
+  "math/lthash: conduwuit-style (O(S log S), sort + SHA-256 every step) (n=64)": [
+    0.0252756
+  ],
+  "math/lthash: conduwuit-style (O(S log S), sort + SHA-256 every step) (n=65536)": [
+    23.412037899999998
+  ],
+  "math/lthash: conduwuit-style (O(S log S), sort + SHA-256 every step) (n=8192)": [
+    1.6145199
+  ],
+  "math/lthash: synapse-style (O(S), unsorted XOR-fold of SHA-256 every step) (n=1024)": [
+    0.1602677
+  ],
+  "math/lthash: synapse-style (O(S), unsorted XOR-fold of SHA-256 every step) (n=128)": [
+    0.031124
+  ],
+  "math/lthash: synapse-style (O(S), unsorted XOR-fold of SHA-256 every step) (n=16)": [
+    0.0155972
+  ],
+  "math/lthash: synapse-style (O(S), unsorted XOR-fold of SHA-256 every step) (n=16384)": [
+    2.4048102
+  ],
+  "math/lthash: synapse-style (O(S), unsorted XOR-fold of SHA-256 every step) (n=2048)": [
+    0.30843509999999996
+  ],
+  "math/lthash: synapse-style (O(S), unsorted XOR-fold of SHA-256 every step) (n=256)": [
+    0.049431
+  ],
+  "math/lthash: synapse-style (O(S), unsorted XOR-fold of SHA-256 every step) (n=32)": [
+    0.0175032
+  ],
+  "math/lthash: synapse-style (O(S), unsorted XOR-fold of SHA-256 every step) (n=32768)": [
+    4.9310275
+  ],
+  "math/lthash: synapse-style (O(S), unsorted XOR-fold of SHA-256 every step) (n=4096)": [
+    0.6068005
+  ],
+  "math/lthash: synapse-style (O(S), unsorted XOR-fold of SHA-256 every step) (n=512)": [
+    0.0865717
+  ],
+  "math/lthash: synapse-style (O(S), unsorted XOR-fold of SHA-256 every step) (n=64)": [
+    0.0220132
+  ],
+  "math/lthash: synapse-style (O(S), unsorted XOR-fold of SHA-256 every step) (n=65536)": [
+    9.9181507
+  ],
+  "math/lthash: synapse-style (O(S), unsorted XOR-fold of SHA-256 every step) (n=8192)": [
+    1.2081317
+  ],
+  "math/reconcile: algebraic/decode/32x16": [
+    0.291221
+  ],
+  "math/reconcile: algebraic/decode/32x32": [
+    0.80327
+  ],
+  "math/reconcile: algebraic/decode/8x4": [
+    0.042027
+  ],
+  "math/reconcile: algebraic/subtract/32x16": [
+    5.7e-05
+  ],
+  "math/reconcile: algebraic/subtract/32x32": [
+    8.3e-05
+  ],
+  "math/reconcile: algebraic/subtract/8x4": [
+    4.6e-05
+  ],
+  "math/reconcile: algebraic/toggle/32x16": [
+    0.004401
+  ],
+  "math/reconcile: algebraic/toggle/32x32": [
+    0.013236
+  ],
+  "math/reconcile: algebraic/toggle/8x4": [
+    0.000409
+  ],
+  "math/reconcile: extract+decode/N=10000 \u0394\u224864": [
+    1.570886
+  ],
+  "math/reconcile: extract+decode/N=100000 \u0394\u2248512": [
+    13.241642
+  ],
+  "math/reconcile: extract+decode/N=1000000 \u0394\u22484096": [
+    104.237362
+  ],
+  "math/reconcile: extract+decode/N=10000000 \u0394\u22484096": [
+    103.796771
+  ],
+  "math/reconcile: extract+decode/N=10000000 \u0394\u224899968": [
+    2526.660406
+  ],
+  "math/reconcile: extract/N=10M \u0394\u22484096": [
+    1.207829
+  ],
+  "math/reconcile: extract/N=10M \u0394\u2248512": [
+    0.150822
+  ],
+  "math/reconcile: extract/N=10M \u0394\u224864": [
+    0.018752
+  ],
+  "math/reconcile: gf64 multiply": [
+    6e-06
+  ],
+  "math/reconcile: pinsketch decode/1": [
+    0.00198
+  ],
+  "math/reconcile: pinsketch decode/16": [
+    0.228772
+  ],
+  "math/reconcile: pinsketch decode/32": [
+    0.536266
+  ],
+  "math/reconcile: pinsketch decode/4": [
+    0.031774
+  ],
+  "math/reconcile: pinsketch decode/8": [
+    0.091272
+  ],
+  "math/reconcile: resident insert/100": [
+    0.008271
+  ],
+  "math/reconcile: resident insert/1000": [
+    0.082755
+  ],
+  "math/reconcile: resident insert/10000": [
+    0.773043
+  ],
+  "math/reconcile: triage/estimate strata/0": [
+    8.4e-05
+  ],
+  "math/reconcile: triage/estimate strata/100": [
+    0.015109
+  ],
+  "math/reconcile: triage/estimate strata/4": [
+    0.010159
+  ],
+  "math/reconcile: triage/parse bucket sketch": [
+    0.000101
+  ],
+  "math/reconcile: triage/transition_bucket_batch split": [
+    0.000164
+  ],
+  "state/ruma_vs_rezzy/4-Way Federated Partition (500 Members, 4 Forks, 200 Conflicted Keys): rezzy (bitmap accelerated)": [
+    727.258601
+  ],
+  "state/ruma_vs_rezzy/4-Way Federated Partition (500 Members, 4 Forks, 200 Conflicted Keys): ruma-state-res (original)": [
+    616.891955
+  ],
+  "state/ruma_vs_rezzy/8-Way Split-Brain Chaos (1,000 Members, 8 Forks, 400 Conflicted Keys): rezzy (bitmap accelerated)": [
+    345.56257
+  ],
+  "state/ruma_vs_rezzy/8-Way Split-Brain Chaos (1,000 Members, 8 Forks, 400 Conflicted Keys): ruma-state-res (original)": [
+    313.333842
+  ],
+  "state/ruma_vs_rezzy/Mega Rebuild Stress (2,000 Members, 8 Forks, 800 Conflicted Keys): rezzy (bitmap accelerated)": [
+    319.434565
+  ],
+  "state/ruma_vs_rezzy/Mega Rebuild Stress (2,000 Members, 8 Forks, 800 Conflicted Keys): ruma-state-res (original)": [
+    274.501246
+  ],
+  "state/ruma_vs_rezzy/Nasty 2-Branch Conflict (500 Members, 100 Conflicted Keys): rezzy (bitmap accelerated)": [
+    969.594595
+  ],
+  "state/ruma_vs_rezzy/Nasty 2-Branch Conflict (500 Members, 100 Conflicted Keys): ruma-state-res (original)": [
+    841.914891
+  ]
+}
