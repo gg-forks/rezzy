@@ -12,6 +12,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Command, Output};
+use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -25,6 +26,11 @@ const STILL_MISSING: &str = "$stillMissingEventThatNoServerHas000000000000";
 const PDU: &str = r#"{"auth_events":["$sbusQdJu8vp4mYghGgIdFrz9K_UbSNVmVr3UBxLM2Mk","$SbBcrKoU8Wo-rq9hH6NORFEcD7jrSgLkyYBgvlvNZVc"],"content":{"body":"A nice sunny day spent near the window.","m.mentions":{},"msgtype":"m.text"},"depth":265,"hashes":{"sha256":"BN2Mpld9Ox01qmZjEh+2SXjc3hf67Z+UrUvCc/TdJoc"},"origin_server_ts":1763426725083,"prev_events":["$YgQCx1FMxaNlpl8CoymZCmPLcE9YJ95kwnp8VBHJiqY"],"room_id":"!L58ME6ufiP49v97UIOBIpvWKEgj4912JmECPuDzlvCI","sender":"@chtr-x:matrix.org","signatures":{"matrix.org":{"ed25519:a_RXGa":"EKGxFhkSSIlattBwQDE9V1moJdRz6FGd4tC+u43q6z0/8v3oys743hvIStLWTO0LYR1GrntNOHyztbUaIVQOAw"}},"type":"m.room.message","unsigned":{"age_ts":1763426725083}}"#;
 /// 32 bytes (0..31), base64 without padding: a valid, throwaway ed25519 seed.
 const KEY_LINE: &str = "ed25519 test AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
+
+// All subprocesses can share the same encrypted test key. The key is created
+// once per test binary rather than paying the production-strength Argon2 cost
+// for every fixture.
+static ENCRYPTED_KEY: OnceLock<Vec<u8>> = OnceLock::new();
 
 #[derive(Clone, Copy)]
 enum Backfill {
@@ -235,15 +241,8 @@ impl Fixture {
         }
         fs::write(dir.join("base.jsonl"), lines.join("\n") + "\n").unwrap();
         fs::write(dir.join("key.plain"), format!("{KEY_LINE}\n")).unwrap();
-        let out = Command::new(env!("CARGO_BIN_EXE_rezzy"))
-            .env("REZZY_KEY_PASSPHRASE", "test")
-            .args(["federation", "encrypt-key", "-i"])
-            .arg(dir.join("key.plain"))
-            .arg("-o")
-            .arg(dir.join("key.enc"))
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "encrypt-key failed: {out:?}");
+        let encrypted = ENCRYPTED_KEY.get_or_init(encrypted_key);
+        fs::write(dir.join("key.enc"), encrypted).unwrap();
         Self { dir }
     }
 
@@ -1312,4 +1311,11 @@ fn state_diff_rejects_a_room_without_the_sigil_before_any_request() {
     let fx = Fixture::new("sd-bad-room");
     let out = fx.state_diff(&[&a.url], "clearR", &[]);
     assert_rejects_room_without_sigil(&out, &a);
+}
+
+/// Seals the test key once through the production `keyfile::seal` path. The
+/// result is cached, so the 64 MiB KDF runs once per test binary rather than
+/// once per fixture.
+fn encrypted_key() -> Vec<u8> {
+    rezzy_cli::keyfile::seal(format!("{KEY_LINE}\n").as_bytes(), b"test").unwrap()
 }

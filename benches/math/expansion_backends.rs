@@ -136,8 +136,8 @@ pub fn hex(bytes: &[u8]) -> String {
 /// beyond `SEED_BYTES` are ignored.
 pub fn unpack_lanes(bytes: &[u8]) -> [u16; SEED_BYTES / 2] {
     let mut out = [0u16; SEED_BYTES / 2];
-    for (lane, pair) in out.iter_mut().zip(bytes.chunks_exact(2)) {
-        *lane = u16::from_le_bytes([pair[0], pair[1]]);
+    for (lane, pair) in out.iter_mut().zip(bytes.as_chunks::<2>().0) {
+        *lane = u16::from_le_bytes(*pair);
     }
     out
 }
@@ -247,8 +247,8 @@ pub mod sha512 {
     /// SHA-512 of an arbitrary-length message.
     pub fn hash(msg: &[u8]) -> [u8; 64] {
         let mut state = H0;
-        let mut chunks = msg.chunks_exact(128);
-        for block in chunks.by_ref() {
+        let (chunks, rem) = msg.as_chunks::<128>();
+        for block in chunks {
             let mut padded = [0u8; 128];
             padded.copy_from_slice(block);
             compress(&mut state, &padded);
@@ -256,14 +256,13 @@ pub mod sha512 {
 
         // One- or two-block padding tail: remainder, 0x80, zeros, 128-bit
         // big-endian bit length.
-        let rem = chunks.remainder();
         let mut tail = [0u8; 256];
         tail[..rem.len()].copy_from_slice(rem);
         tail[rem.len()] = 0x80;
         let tail_len = if rem.len() < 112 { 128 } else { 256 };
         let bit_len = (msg.len() as u128).wrapping_mul(8);
         tail[tail_len - 16..tail_len].copy_from_slice(&bit_len.to_be_bytes());
-        for block in tail[..tail_len].chunks_exact(128) {
+        for block in tail[..tail_len].as_chunks::<128>().0 {
             let mut padded = [0u8; 128];
             padded.copy_from_slice(block);
             compress(&mut state, &padded);
@@ -275,7 +274,7 @@ pub mod sha512 {
     /// `SHA-512(prk || u32be(i))`.
     pub fn ctr_expand(prk: &[u8; 64], out: &mut [u8]) {
         debug_assert_eq!(out.len() % 64, 0);
-        for (i, chunk) in out.chunks_exact_mut(64).enumerate() {
+        for (i, chunk) in out.as_chunks_mut::<64>().0.iter_mut().enumerate() {
             let mut block = [0u8; 128];
             block[..64].copy_from_slice(prk);
             block[64..68].copy_from_slice(&(i as u32).to_be_bytes());
@@ -339,7 +338,7 @@ pub mod sha512 {
 
     fn pack(state: &[u64; 8]) -> [u8; 64] {
         let mut out = [0u8; 64];
-        for (chunk, word) in out.chunks_exact_mut(8).zip(state) {
+        for (chunk, word) in out.as_chunks_mut::<8>().0.iter_mut().zip(state) {
             chunk.copy_from_slice(&word.to_be_bytes());
         }
         out
@@ -463,7 +462,7 @@ pub mod aes {
         }
         #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
         let _ = ni;
-        for (i, chunk) in out.chunks_exact_mut(16).enumerate() {
+        for (i, chunk) in out.as_chunks_mut::<16>().0.iter_mut().enumerate() {
             chunk.copy_from_slice(&encrypt_block(&rk, &(i as u128).to_be_bytes()));
         }
     }
@@ -581,7 +580,9 @@ pub mod aes {
                 let mut out = [unsafe { imp::_mm_setzero_si128() }; 15];
                 for (r, key) in out.iter_mut().enumerate() {
                     let mut bytes = [0u8; 16];
-                    for (word, slot) in rk.0[4 * r..4 * r + 4].iter().zip(bytes.chunks_exact_mut(4))
+                    for (word, slot) in rk.0[4 * r..4 * r + 4]
+                        .iter()
+                        .zip(bytes.as_chunks_mut::<4>().0.iter_mut())
                     {
                         slot.copy_from_slice(&word.to_be_bytes());
                     }
@@ -605,7 +606,7 @@ pub mod aes {
         /// Counter-mode squeeze: block `i` is `AES-256(u128be(i))`.
         #[target_feature(enable = "aes")]
         pub(super) unsafe fn ctr_expand(rk: &RoundKeys128, out: &mut [u8]) {
-            for (i, chunk) in out.chunks_exact_mut(16).enumerate() {
+            for (i, chunk) in out.as_chunks_mut::<16>().0.iter_mut().enumerate() {
                 let counter = (i as u128).to_be_bytes();
                 let loaded = imp::_mm_loadu_si128(counter.as_ptr() as *const imp::__m128i);
                 let a = rounds(&rk.0, loaded);

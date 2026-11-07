@@ -168,6 +168,32 @@ pub enum ClientAction {
     },
 }
 
+/// GF(2^256) requester action selected from resident summaries and strata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Gf256ClientAction {
+    /// The frame digest and count agree; no request is needed.
+    Synchronized,
+    /// Locate a common DAG anchor before attempting set extraction.
+    ExtremityDiff,
+    /// Request these full-digest buckets next.
+    BucketSketches {
+        /// Buckets provisioned from the strata estimate and concurrency headroom.
+        requests: alloc::vec::Vec<BucketRequest>,
+    },
+}
+
+/// Action selected by [`ReconciliationClient::select_default_action`].
+///
+/// The default is the GF(2^256) full-digest path. The GF(2^64) variant keeps
+/// the existing path available to callers that opt out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DefaultClientAction {
+    /// Existing GF(2^64) bucket path.
+    Gf64(ClientAction),
+    /// Default GF(2^256) full-digest path.
+    Gf256(Gf256ClientAction),
+}
+
 /// Population (the larger side's node count) at or below which a known
 /// collision is given up on instead of split further. Each extra level costs
 /// one round, but siblings verify in parallel, so the loss shrinks from the
@@ -239,7 +265,7 @@ struct Phase1Failure {
 }
 
 /// Whether `ancestor` is `node` or one of its ancestors.
-fn covers(ancestor: (u8, u64), node: (u8, u64)) -> bool {
+pub(crate) fn covers(ancestor: (u8, u64), node: (u8, u64)) -> bool {
     let Some(shift) = node.0.checked_sub(ancestor.0) else {
         return false;
     };
@@ -247,7 +273,7 @@ fn covers(ancestor: (u8, u64), node: (u8, u64)) -> bool {
 }
 
 /// The half-open interval represented by a bucket prefix at `MAX_DEPTH`.
-fn node_interval(node: (u8, u64)) -> Option<(u128, u128)> {
+pub(crate) fn node_interval(node: (u8, u64)) -> Option<(u128, u128)> {
     let remaining = crate::MAX_DEPTH.checked_sub(node.0)?;
     let remaining = u32::from(remaining);
     let start = u128::from(node.1).checked_shl(remaining)?;
@@ -257,7 +283,7 @@ fn node_interval(node: (u8, u64)) -> Option<(u128, u128)> {
 
 /// Combines a complete, non-overlapping cover of `parent` from descendant
 /// summaries. `None` means some part of the parent has not arrived yet.
-fn summarize_descendant_cover(
+pub(crate) fn summarize_descendant_cover(
     parent: (u8, u64),
     summaries: &[(u8, u64, NodeSummary)],
 ) -> Option<(NodeSummary, bool)> {
@@ -289,6 +315,70 @@ fn summarize_descendant_cover(
         digest ^= summary.digest;
     }
     (cursor == end).then_some((NodeSummary { count, digest }, count_valid))
+}
+
+/// Adds the current round's responder summaries to the descendants awaiting
+/// a parent's split check. A fresh summary supersedes an overlapping earlier
+/// one, since a previously observed descendant may itself have been split.
+pub(crate) fn record_split_summaries(
+    parents: &[(u8, u64, NodeSummary)],
+    awaiting: &mut alloc::vec::Vec<(u8, u64, NodeSummary)>,
+    requests: &[BucketRequest],
+    remote: &[NodeSummary],
+) {
+    for (request, &summary) in requests.iter().zip(remote) {
+        let node = (request.depth, request.prefix);
+        awaiting.retain(|&(depth, prefix, _)| {
+            !covers((depth, prefix), node) && !covers(node, (depth, prefix))
+        });
+        if parents
+            .iter()
+            .any(|&(depth, prefix, _)| depth < node.0 && covers((depth, prefix), node))
+        {
+            awaiting.push((node.0, node.1, summary));
+        }
+    }
+}
+
+/// Removes and returns parents whose descendants now form a complete cover.
+/// The boolean is false when the descendant count sum overflowed.
+#[allow(clippy::type_complexity)]
+pub(crate) fn take_complete_split_summaries(
+    parents: &mut alloc::vec::Vec<(u8, u64, NodeSummary)>,
+    awaiting: &[(u8, u64, NodeSummary)],
+) -> alloc::vec::Vec<((u8, u64), NodeSummary, NodeSummary, bool)> {
+    let candidates: alloc::vec::Vec<(u8, u64)> = parents
+        .iter()
+        .map(|&(depth, prefix, _)| (depth, prefix))
+        .collect();
+    let mut complete = alloc::vec::Vec::new();
+    for parent in candidates {
+        let Some(slot) = parents
+            .iter()
+            .position(|&(depth, prefix, _)| (depth, prefix) == parent)
+        else {
+            continue;
+        };
+        let Some((descendant_summary, count_valid)) = summarize_descendant_cover(parent, awaiting)
+        else {
+            continue;
+        };
+        let parent_summary = parents.remove(slot).2;
+        complete.push((parent, parent_summary, descendant_summary, count_valid));
+    }
+    complete
+}
+
+/// Drops awaited summaries that no longer belong to a parent awaiting a split.
+pub(crate) fn prune_awaiting(
+    parents: &[(u8, u64, NodeSummary)],
+    awaiting: &mut alloc::vec::Vec<(u8, u64, NodeSummary)>,
+) {
+    awaiting.retain(|&(depth, prefix, _)| {
+        parents.iter().any(|&(parent_depth, parent_prefix, _)| {
+            parent_depth < depth && covers((parent_depth, parent_prefix), (depth, prefix))
+        })
+    });
 }
 
 /// Whether `h64` falls inside `node`.
@@ -436,36 +526,10 @@ impl BucketExchange {
         remote: &[NodeSummary],
         batch: &mut BucketDecodeBatch,
     ) {
-        for (request, &summary) in requests.iter().zip(remote) {
-            let node = (request.depth, request.prefix);
-            // A fresh summary supersedes any overlapping earlier summary: a
-            // previously observed descendant may itself have been split.
-            self.awaiting.retain(|&(depth, prefix, _)| {
-                !covers((depth, prefix), node) && !covers(node, (depth, prefix))
-            });
-            let under_parent = self
-                .parents
-                .iter()
-                .any(|&(d, p, _)| d < node.0 && covers((d, p), node));
-            if under_parent {
-                self.awaiting.push((node.0, node.1, summary));
-            }
-        }
-
-        let candidates: alloc::vec::Vec<(u8, u64)> =
-            self.parents.iter().map(|&(d, p, _)| (d, p)).collect();
-        for parent in candidates {
-            // An earlier ladder failure in this loop may have dropped it.
-            let Some(slot) = self.parents.iter().position(|&(d, p, _)| (d, p) == parent) else {
-                continue;
-            };
-            let parent_summary = self.parents[slot].2;
-            let Some((descendant_summary, count_valid)) =
-                summarize_descendant_cover(parent, &self.awaiting)
-            else {
-                continue;
-            };
-            self.parents.remove(slot);
+        record_split_summaries(&self.parents, &mut self.awaiting, requests, remote);
+        for (parent, parent_summary, descendant_summary, count_valid) in
+            take_complete_split_summaries(&mut self.parents, &self.awaiting)
+        {
             if !count_valid || descendant_summary != parent_summary {
                 rezzy_log::warn!(
                     depth = parent.0,
@@ -477,17 +541,20 @@ impl BucketExchange {
                     actual_digest = descendant_summary.digest,
                     "split summaries are inconsistent; discarding parent bucket"
                 );
+                // A parent already covered by an earlier ladder failure in
+                // this call must not be recorded again: ladder_fail appends
+                // regions, so re-failing it would duplicate the entry.
+                if self
+                    .ladder_failed
+                    .iter()
+                    .any(|&region| covers(region, parent))
+                {
+                    continue;
+                }
                 self.ladder_fail(parent, batch);
             }
         }
-
-        self.awaiting.retain(|&(depth, prefix, _)| {
-            self.parents
-                .iter()
-                .any(|&(parent_depth, parent_prefix, _)| {
-                    parent_depth < depth && covers((parent_depth, parent_prefix), (depth, prefix))
-                })
-        });
+        prune_awaiting(&self.parents, &mut self.awaiting);
     }
 
     /// Whether a phase-1 failure of `node` repeats an earlier one: same
@@ -967,7 +1034,7 @@ impl BucketExchange {
 /// Finds the request a failed bucket was submitted under, then retries or
 /// splits it. Shared by [`BucketExchange::advance`] and
 /// [`ReconciliationClient::transition_bucket_batch`].
-fn retry_failed_bucket(
+pub(crate) fn retry_failed_bucket(
     previous_requests: &[BucketRequest],
     depth: u8,
     prefix: u64,
@@ -1199,6 +1266,84 @@ impl ReconciliationClient {
         };
 
         self.select_sketch_action(estimated_delta, concurrency_headroom)
+    }
+
+    /// Selects the GF(2^256) full-digest action using the same summary
+    /// equality short-circuit and strata-based capacity estimate as
+    /// [`Self::select_action`]. `local` must have been populated from
+    /// [`crate::FixedWindowElementHash`] values for the full-digest path.
+    #[must_use]
+    pub fn select_gf256_action(
+        self,
+        local: &ResidentKernel,
+        remote: RemoteDigest,
+        concurrency_headroom: usize,
+    ) -> Gf256ClientAction {
+        if let Some(action) = Self::action_for_remote_state(local, &remote) {
+            return if action == ClientAction::Synchronized {
+                Gf256ClientAction::Synchronized
+            } else {
+                Gf256ClientAction::ExtremityDiff
+            };
+        }
+
+        // Strata only sizes the initial cover. A bad or low estimate cannot
+        // omit key space: every plan covers the complete digest-prefix space,
+        // and failed buckets still retry or split. Start at the per-bucket
+        // maximum so an underestimated root cannot select an undersized sketch.
+        if self.max_aggregate_capacity < MAX_BUCKET_SKETCH_CAPACITY {
+            return Gf256ClientAction::ExtremityDiff;
+        }
+        let estimate = Self::estimate_delta(local, &remote).unwrap_or(0);
+        if self
+            .gate_threshold
+            .is_some_and(|threshold| estimate > threshold)
+        {
+            return Gf256ClientAction::ExtremityDiff;
+        }
+        let headroom = u64::try_from(concurrency_headroom).unwrap_or(u64::MAX);
+        let target = provision_capacity(estimate, headroom)
+            .unwrap_or(u64::MAX)
+            .min(self.max_aggregate_capacity as u64);
+        let requested_buckets = usize::try_from(target.div_ceil(MAX_BUCKET_SKETCH_CAPACITY as u64))
+            .unwrap_or(MAX_BUCKETS_PER_ROUND)
+            .max(1);
+
+        let max_buckets =
+            (self.max_aggregate_capacity / MAX_BUCKET_SKETCH_CAPACITY).min(MAX_BUCKETS_PER_ROUND);
+        let max_power_of_two = 1_usize.checked_shl(max_buckets.ilog2()).unwrap_or(1);
+        let bucket_count = requested_buckets
+            .checked_next_power_of_two()
+            .unwrap_or(max_power_of_two)
+            .min(max_power_of_two);
+        let depth = u8::try_from(bucket_count.trailing_zeros()).unwrap_or(MAX_BUCKET_ROUND_DEPTH);
+        let requests = (0..bucket_count)
+            .map(|prefix| {
+                BucketRequest::new(
+                    depth,
+                    u64::try_from(prefix).unwrap_or(u64::MAX),
+                    MAX_BUCKET_SKETCH_CAPACITY,
+                )
+            })
+            .collect();
+        Gf256ClientAction::BucketSketches { requests }
+    }
+
+    /// Selects the default reconciliation action.
+    ///
+    /// New callers should use this entry point: it selects the GF(2^256)
+    /// full-digest path. `local` must have been populated from
+    /// [`crate::FixedWindowElementHash`] values. [`Self::select_action`]
+    /// remains available for callers that explicitly stay on the existing
+    /// GF(2^64) path.
+    #[must_use]
+    pub fn select_default_action(
+        self,
+        local: &ResidentKernel,
+        remote: RemoteDigest,
+        concurrency_headroom: usize,
+    ) -> DefaultClientAction {
+        DefaultClientAction::Gf256(self.select_gf256_action(local, remote, concurrency_headroom))
     }
 
     const fn action_for_remote_state(
@@ -1474,6 +1619,7 @@ mod tests {
     use alloc::vec;
 
     use super::*;
+    use crate::FixedWindowElementHash;
 
     const fn hash(wide: u128, short: u64) -> ElementHash {
         ElementHash {
@@ -1526,6 +1672,156 @@ mod tests {
                 requests: vec![BucketRequest::new(0, 0, 31)],
                 accumulated_roots: vec![],
             }
+        );
+    }
+
+    #[test]
+    fn gf256_selection_uses_summary_short_circuit_and_strata_capacity() {
+        let client = ReconciliationClient::default();
+        let local = ResidentKernel::new();
+        let mut remote = ResidentKernel::new();
+        for value in (1_u64..=17).step_by(2) {
+            let mut digest = [0_u8; 32];
+            digest[..8].copy_from_slice(&value.to_be_bytes());
+            digest[8..16].copy_from_slice(&value.to_be_bytes());
+            digest[31] = u8::try_from(value).unwrap();
+            remote
+                .insert(FixedWindowElementHash::from_digest32(digest))
+                .unwrap();
+        }
+
+        let remote_summary = RemoteDigest {
+            digest: remote.accumulator().digest(),
+            known_event_count: remote.accumulator().known_event_count(),
+            strata: *remote.strata(),
+            frame_matches: true,
+            has_unknown_extremity: false,
+        };
+        assert_eq!(
+            client.select_gf256_action(&remote, remote_summary, 0),
+            Gf256ClientAction::Synchronized
+        );
+        assert_eq!(
+            client.select_gf256_action(&local, remote_summary, 0),
+            Gf256ClientAction::BucketSketches {
+                requests: vec![BucketRequest::new(0, 0, MAX_BUCKET_SKETCH_CAPACITY)],
+            }
+        );
+    }
+
+    #[test]
+    fn default_action_selects_gf256() {
+        let remote = RemoteDigest {
+            digest: 0,
+            known_event_count: 0,
+            strata: [[0; STRATUM_CAPACITY]; STRATA_COUNT],
+            frame_matches: true,
+            has_unknown_extremity: false,
+        };
+        assert_eq!(
+            ReconciliationClient::default().select_default_action(
+                &ResidentKernel::new(),
+                remote,
+                0
+            ),
+            DefaultClientAction::Gf256(Gf256ClientAction::Synchronized)
+        );
+
+        let differing = RemoteDigest {
+            digest: 1,
+            known_event_count: 1,
+            strata: [[0; STRATUM_CAPACITY]; STRATA_COUNT],
+            frame_matches: true,
+            has_unknown_extremity: false,
+        };
+        let DefaultClientAction::Gf256(Gf256ClientAction::BucketSketches { requests }) =
+            ReconciliationClient::default().select_default_action(
+                &ResidentKernel::new(),
+                differing,
+                0,
+            )
+        else {
+            panic!("differing state should select GF(2^256) bucket sketches");
+        };
+        assert!(!requests.is_empty());
+    }
+
+    #[test]
+    fn gf256_selection_clamps_low_and_high_strata_hints() {
+        let client = ReconciliationClient::default()
+            .with_max_aggregate_capacity(160)
+            .with_gate_threshold(None);
+        let local = ResidentKernel::new();
+        let under_estimate = RemoteDigest {
+            digest: 1,
+            known_event_count: 0,
+            strata: [[0; STRATUM_CAPACITY]; STRATA_COUNT],
+            frame_matches: true,
+            has_unknown_extremity: false,
+        };
+        assert_eq!(
+            ReconciliationClient::default()
+                .with_max_aggregate_capacity(MAX_BUCKET_SKETCH_CAPACITY - 1)
+                .select_gf256_action(&local, under_estimate, 0),
+            Gf256ClientAction::ExtremityDiff
+        );
+        let Gf256ClientAction::BucketSketches {
+            requests: under_requests,
+        } = client.select_gf256_action(&local, under_estimate, 0)
+        else {
+            panic!("under-estimate should retain the root bucket");
+        };
+        assert_eq!(under_requests, vec![BucketRequest::new(0, 0, 32)]);
+
+        let mut high_delta = ResidentKernel::new();
+        for seed in 1_u64..=256 {
+            let mut digest = [0_u8; 32];
+            digest[..8].copy_from_slice(&seed.to_be_bytes());
+            digest[8..16].copy_from_slice(&seed.to_be_bytes());
+            digest[31] = u8::try_from(seed).unwrap_or(1);
+            high_delta
+                .insert(FixedWindowElementHash::from_digest32(digest))
+                .unwrap();
+        }
+        let over_estimate = RemoteDigest {
+            digest: 1,
+            known_event_count: u64::MAX,
+            strata: *high_delta.strata(),
+            frame_matches: true,
+            has_unknown_extremity: false,
+        };
+        assert_eq!(
+            client
+                .with_gate_threshold(Some(0))
+                .select_gf256_action(&local, over_estimate, 0),
+            Gf256ClientAction::ExtremityDiff
+        );
+        let Gf256ClientAction::BucketSketches {
+            requests: over_requests,
+        } = client.select_gf256_action(&local, over_estimate, 0)
+        else {
+            panic!("over-estimate should be capped to a bounded bucket plan");
+        };
+        assert_eq!(
+            over_requests.len(),
+            4,
+            "five requested buckets are clamped to the largest power of two"
+        );
+        assert_eq!(over_requests[0].depth, 2);
+        assert_eq!(
+            over_requests.len(),
+            1_usize << over_requests[0].depth,
+            "the requests still cover the full key space"
+        );
+        assert!(over_requests
+            .iter()
+            .all(|request| request.capacity == MAX_BUCKET_SKETCH_CAPACITY));
+        assert!(
+            over_requests
+                .iter()
+                .map(|request| request.capacity)
+                .sum::<usize>()
+                <= MAX_BUCKETED_SKETCH_CAPACITY
         );
     }
 

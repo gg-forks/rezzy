@@ -18,6 +18,7 @@ impl Xorshift128Hash {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> u64 {
         let mut value = self.state[0];
         let other = self.state[1];

@@ -296,9 +296,97 @@ fn wide_cases(rng: &mut Rng) {
     }
 }
 
+/// Single-value mutation around the array threshold, matching the flag-update
+/// path during ingest. Measured after the first promotion, and with a fresh
+/// clone each time to include the one-off crossing cost.
+fn mutation_boundary() {
+    // This isolates Bitmap's representation transition; there is no
+    // corresponding Roaring operation whose threshold matches this boundary.
+    let base: Bitmap = (0..4096u32).map(|v| v * 2).collect();
+    let clone_ns = ns_per_iter(1_000, || {
+        black_box(base.clone());
+    });
+    let crossing_ns = ns_per_iter(1_000, || {
+        let mut bitmap = base.clone();
+        black_box(bitmap.insert(1));
+    });
+    println!(
+        "{:<44} bitmap={:>12.0} ns  (clone {:.0} ns)",
+        "insert crossing array threshold",
+        crossing_ns - clone_ns,
+        clone_ns
+    );
+
+    let mut steady = base.clone();
+    steady.insert(1);
+    let mut next = 3u32;
+    let steady_ns = ns_per_iter(1_000, || {
+        black_box(steady.insert(next));
+        next = next.wrapping_add(2);
+    });
+    println!(
+        "{:<44} bitmap={:>12.0} ns",
+        "insert after promotion (steady)", steady_ns
+    );
+
+    let mut toggling = base;
+    toggling.insert(1);
+    toggling.remove(1);
+    let toggle_ns = ns_per_iter(1_000, || {
+        black_box(toggling.insert(1));
+        black_box(toggling.remove(1));
+    });
+    println!(
+        "{:<44} bitmap={:>12.0} ns",
+        "alternating insert/erase at threshold", toggle_ns
+    );
+}
+
+/// Run-backed containers are in-memory only: `encode` expands them to a v1
+/// array or bitset, and `decode` parses the wire chunk and then canonicalizes
+/// it back into the smallest in-memory container (often a run). The timings
+/// below therefore cover those combined operations, not raw wire parsing
+/// alone. The random sparse/dense cases never build runs.
+fn run_container_round_trip() {
+    println!("run container round trip (in-memory runs, v1 wire, decode re-canonicalizes)");
+    for &(runs, per_run) in &[
+        (2u32, 500u32),
+        (1, 65_000),
+        (10, 6_000),
+        (100, 600),
+        (1_000, 60),
+    ] {
+        let values: Vec<u32> = (0..runs)
+            .flat_map(|run| {
+                let start = run * (per_run + 2);
+                (start..start + per_run).collect::<Vec<_>>()
+            })
+            .collect();
+        let bitmap: Bitmap = values.iter().copied().collect();
+        let encoded = bitmap.encode();
+        assert_eq!(Bitmap::decode(&encoded).expect("decode"), bitmap);
+        let encode_ns = ns_per_iter(200, || {
+            black_box(bitmap.encode());
+        });
+        let decode_ns = ns_per_iter(200, || {
+            black_box(Bitmap::decode(&encoded).expect("decode"));
+        });
+        println!(
+            "{:<30} runs={runs:<5} values={:<6} bytes={:<6} encode+expand={:>7.0} ns decode+canon={:>7.0} ns",
+            "run-backed container",
+            values.len(),
+            encoded.len(),
+            encode_ns,
+            decode_ns
+        );
+    }
+}
+
 /// Entry point for the bitmap comparison benchmark.
 pub fn run() {
     println!("Bitmap vs roaring (ratio < 1 means Bitmap is faster)");
+    mutation_boundary();
+    run_container_round_trip();
     let mut rng = Rng::new(0x2545_f491_4f6c_dd1d);
 
     for &(span, pm, label) in &[

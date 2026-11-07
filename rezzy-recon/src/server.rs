@@ -6,7 +6,7 @@
 //! Responder-side MSC0501 reconciliation digest generation.
 
 use alloc::{
-    collections::{BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     string::ToString,
     vec::Vec,
 };
@@ -16,8 +16,10 @@ use crate::EventId;
 use super::{
     algebraic::SyndromeSketch,
     triage::{BucketRequest, NodeSummary},
-    AlgebraicError, ElementHash, EventIdFormat, RoomAccumulator, RoomEventIdKind, H64_TRIE_WIDTH,
+    AccumulatedElement, AlgebraicError, ElementHash, EventIdFormat, FixedWindowElementHash,
+    RoomAccumulator, RoomEventIdKind, H64_TRIE_WIDTH,
 };
+use crate::gf256::Gf256Sketch;
 
 /// Read-only helper over a pre-sorted `h64` index.
 ///
@@ -252,23 +254,78 @@ pub trait ForwardGraph<Id: EventId> {
             |s| ElementHash::from_matrix_event_id(s, format),
         )
     }
+
+    /// Returns the full-digest element for a given event ID, using the same
+    /// string and format resolution as [`Self::event_hash`].
+    ///
+    /// Implementations that override [`Self::event_hash`] to customize hashing
+    /// must also override this method if the custom behavior should apply to
+    /// full-digest reconciliation. The default derives the canonical digest
+    /// from the event ID string; a truncated `ElementHash` cannot recover it.
+    ///
+    /// # Errors
+    /// Returns an error if the event ID format is invalid or hashing fails.
+    fn fixed_window_hash(&self, id: &Id) -> Result<FixedWindowElementHash, AlgebraicError> {
+        let format = self.event_format(id);
+        self.event_id_str(id).map_or_else(
+            || FixedWindowElementHash::from_matrix_event_id(&id.to_string(), format),
+            |s| FixedWindowElementHash::from_matrix_event_id(s, format),
+        )
+    }
 }
 
-/// Computes the MSC0501 room digest over a negotiated frame.
-///
-/// The frame is mathematically bounded by the causal graph. The digested
-/// population includes only the known events that **causally succeed** (are
-/// topological descendants of) the anchor antichain. Events that causally
-/// precede the anchor, such as pre-join history, are excluded.
-///
-/// # Errors
-/// Returns [`AlgebraicError::UnsupportedRoomVersion`] for a room whose event
-/// IDs are not reference hashes (checked once, before any work), or an error
-/// if any frame event IDs violate format rules or element hashing limits.
-pub fn compute_frame_digest<Id: EventId, G: ForwardGraph<Id>>(
+/// Defines a public frame-digest entry point that folds one element type over
+/// the shared traversal. Both entry points have identical signatures, so the
+/// macro keeps them from drifting apart.
+macro_rules! frame_digest_fn {
+    ($(#[$doc:meta])* $name:ident, |$graph:ident, $id:ident| $hash_of:expr) => {
+        $(#[$doc])*
+        pub fn $name<Id: EventId, G: ForwardGraph<Id>>(
+            kind: RoomEventIdKind,
+            graph: &G,
+            frame_anchors: &[Id],
+        ) -> Result<RoomAccumulator, AlgebraicError> {
+            fold_frame(kind, graph, frame_anchors, |$id| {
+                let $graph = graph;
+                $hash_of
+            })
+        }
+    };
+}
+
+frame_digest_fn! {
+    /// Computes the MSC0501 room digest over a negotiated frame.
+    ///
+    /// The frame is mathematically bounded by the causal graph. The digested
+    /// population includes only the known events that **causally succeed** (are
+    /// topological descendants of) the anchor antichain. Events that causally
+    /// precede the anchor, such as pre-join history, are excluded.
+    ///
+    /// # Errors
+    /// Returns [`AlgebraicError::UnsupportedRoomVersion`] for a room whose event
+    /// IDs are not reference hashes (checked once, before any work), or an error
+    /// if any frame event IDs violate format rules or element hashing limits.
+    compute_frame_digest, |graph, id| graph.event_hash(id)
+}
+
+frame_digest_fn! {
+    /// [`compute_frame_digest`] over full-digest elements: the same traversal,
+    /// accumulating each event's fixed-window residual.
+    ///
+    /// # Errors
+    /// Same as [`compute_frame_digest`]; additionally rejects an all-zero digest.
+    compute_fixed_window_frame_digest, |graph, id| {
+        let hash = graph.fixed_window_hash(id)?;
+        hash.validate()?;
+        Ok(hash)
+    }
+}
+
+fn fold_frame<Id: EventId, G: ForwardGraph<Id>, E: AccumulatedElement>(
     kind: RoomEventIdKind,
     graph: &G,
     frame_anchors: &[Id],
+    mut hash_of: impl FnMut(&Id) -> Result<E, AlgebraicError>,
 ) -> Result<RoomAccumulator, AlgebraicError> {
     kind.require_event_ids_frame()?;
     let mut accumulator = RoomAccumulator::new();
@@ -288,8 +345,7 @@ pub fn compute_frame_digest<Id: EventId, G: ForwardGraph<Id>>(
         for child in graph.children(&current) {
             // Unconditionally mark visited to avoid re-traversing unknown forks
             if visited.insert(child.clone()) && graph.is_known(child) {
-                let hash = graph.event_hash(child)?;
-                accumulator.insert(hash)?;
+                accumulator.insert(hash_of(child)?)?;
                 queue.push_back(child.clone());
             }
         }
@@ -330,6 +386,453 @@ pub fn build_bucket_sketches(
     }
 
     Ok(sketches)
+}
+
+/// In-memory population retaining the full digest required by
+/// `algebraic_gf256`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FixedWindowPopulation {
+    bucket_keys: Vec<u64>,
+    elements: Vec<FixedWindowElementHash>,
+}
+
+impl FixedWindowPopulation {
+    /// Sorts full digests by their fixed big-endian placement key.
+    ///
+    /// # Errors
+    /// Returns `ZeroSketchElement` if a digest is all zero, which is outside
+    /// the `PinSketch` element universe for this profile.
+    pub fn new(elements: Vec<FixedWindowElementHash>) -> Result<Self, AlgebraicError> {
+        if elements
+            .iter()
+            .any(|element| element.sketch_element() == crate::gf256::Gf256::ZERO)
+        {
+            return Err(AlgebraicError::ZeroSketchElement);
+        }
+        let mut elements = elements;
+        elements.sort_unstable_by_key(|element| element.bucket_key());
+        let bucket_keys = elements
+            .iter()
+            .map(|element| element.bucket_key())
+            .collect();
+        Ok(Self {
+            bucket_keys,
+            elements,
+        })
+    }
+
+    /// Number of retained full digests.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.elements.len()
+    }
+
+    /// Whether this population is empty.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.elements.is_empty()
+    }
+
+    fn bucket_range(&self, request: &BucketRequest) -> core::ops::Range<usize> {
+        H64Index::new(&self.bucket_keys).bucket_range_unchecked(request)
+    }
+
+    /// Builds one GF(2^256) sketch for each validated bucket request.
+    ///
+    /// # Errors
+    /// Returns an error for malformed requests, invalid capacities, or a
+    /// sketch element outside the nonzero field-element universe.
+    pub fn bucket_sketches(
+        &self,
+        requests: &[BucketRequest],
+    ) -> Result<Vec<Gf256Sketch>, AlgebraicError> {
+        build_gf256_bucket_sketches(self, requests)
+    }
+
+    /// Builds full-field sketches with the existing per-node count/residual.
+    ///
+    /// # Errors
+    /// Returns an error for malformed requests, invalid capacities, or a
+    /// sketch element outside the nonzero field-element universe.
+    pub fn bucket_nodes(
+        &self,
+        requests: &[BucketRequest],
+    ) -> Result<Vec<(Gf256Sketch, NodeSummary)>, AlgebraicError> {
+        build_gf256_bucket_nodes(self, requests)
+    }
+}
+
+/// Default fixed depth for [`IncrementalFixedWindowPopulation`].
+///
+/// This is the maximum initial cover depth: one bucket per permitted request in
+/// the normal round (`MAX_BUCKETS_PER_ROUND`). Requests shallower than this are
+/// answered by `XORing` cached leaf sketches; requests deeper than this are built
+/// from the elements inside one leaf.
+pub const DEFAULT_BUCKET_CACHE_DEPTH: u8 = crate::client::MAX_BUCKET_ROUND_DEPTH;
+
+/// Maximum sketch capacity maintained per cached leaf.
+const CACHED_LEAF_CAPACITY: usize = crate::triage::MAX_BUCKET_SKETCH_CAPACITY;
+
+/// One fixed-depth leaf of an [`IncrementalFixedWindowPopulation`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CachedBucket {
+    sketch: Gf256Sketch,
+    count: u64,
+    digest: u128,
+}
+
+impl CachedBucket {
+    fn new() -> Result<Self, AlgebraicError> {
+        Ok(Self {
+            sketch: Gf256Sketch::new(CACHED_LEAF_CAPACITY)?,
+            count: 0,
+            digest: 0,
+        })
+    }
+}
+
+/// Incrementally maintained GF(2^256) population with a fixed-depth bucket
+/// cache.
+///
+/// The cache keeps a normal-capacity sketch and [`NodeSummary`] for each prefix
+/// at [`DEFAULT_BUCKET_CACHE_DEPTH`] (or a caller-chosen shallower depth).
+/// Inserting or removing one element toggles exactly one leaf, so the leaf
+/// work is constant in room size; the `BTreeMap` update costs `O(log n)`.
+/// Lookups work as follows:
+///
+/// - requests at or above the cached depth, with capacity at most
+///   `MAX_BUCKET_SKETCH_CAPACITY`, XOR the cached leaf sketches and summaries;
+/// - everything else (deeper splits, or overflow capacity above the normal
+///   maximum) falls back to scanning only the elements inside the requested
+///   prefix, not the whole room.
+///
+/// This is the intended production shape: the level-0/leaf state is sustained by
+/// event insertion/removal, while adaptive splitting narrows a failing region
+/// before any subset scan is needed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncrementalFixedWindowPopulation {
+    depth: u8,
+    leaves: Vec<CachedBucket>,
+    /// `(bucket key, full digest) -> multiplicity`. A map rather than a
+    /// `Vec` per key avoids one heap allocation for every distinct 64-bit
+    /// prefix in a large room.
+    elements: BTreeMap<(u64, [u8; 32]), u64>,
+    len: usize,
+}
+
+impl IncrementalFixedWindowPopulation {
+    /// Builds a cache from an existing population at `depth`.
+    ///
+    /// A depth of 7 covers the normal 128-bucket first round. Larger depths
+    /// increase memory exponentially and are rejected above
+    /// [`crate::client::MAX_BUCKET_ROUND_DEPTH`].
+    ///
+    /// # Errors
+    /// Returns [`AlgebraicError::InvalidBucketIndex`] for a depth above the
+    /// normal round cap, or [`AlgebraicError::ZeroSketchElement`] for an
+    /// all-zero digest.
+    pub fn new(
+        elements: impl IntoIterator<Item = FixedWindowElementHash>,
+        depth: u8,
+    ) -> Result<Self, AlgebraicError> {
+        if depth > crate::client::MAX_BUCKET_ROUND_DEPTH {
+            return Err(AlgebraicError::InvalidBucketIndex);
+        }
+        let leaf_count = 1_usize
+            .checked_shl(u32::from(depth))
+            .ok_or(AlgebraicError::InvalidBucketIndex)?;
+        let leaves = (0..leaf_count)
+            .map(|_| CachedBucket::new())
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut population = Self {
+            depth,
+            leaves,
+            elements: BTreeMap::new(),
+            len: 0,
+        };
+        for element in elements {
+            population.insert(element)?;
+        }
+        Ok(population)
+    }
+
+    /// Builds a cache at [`DEFAULT_BUCKET_CACHE_DEPTH`].
+    ///
+    /// # Errors
+    /// Same as [`Self::new`].
+    pub fn with_default_depth(
+        elements: impl IntoIterator<Item = FixedWindowElementHash>,
+    ) -> Result<Self, AlgebraicError> {
+        Self::new(elements, DEFAULT_BUCKET_CACHE_DEPTH)
+    }
+
+    /// Number of retained elements.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether the population is empty.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Cached prefix depth.
+    #[must_use]
+    pub const fn depth(&self) -> u8 {
+        self.depth
+    }
+
+    /// Adds one element, updating its cached leaf in O(sketch capacity).
+    ///
+    /// # Errors
+    /// Returns [`AlgebraicError::ZeroSketchElement`] for the reserved all-zero
+    /// digest, or [`AlgebraicError::CountOverflow`] at `u64::MAX` elements.
+    pub fn insert(&mut self, element: FixedWindowElementHash) -> Result<(), AlgebraicError> {
+        element.validate()?;
+        let key = element.bucket_key();
+        let index = self.leaf_index(key);
+        let leaf = &mut self.leaves[index];
+        leaf.sketch.toggle(element.sketch_element())?;
+        leaf.count = leaf
+            .count
+            .checked_add(1)
+            .ok_or(AlgebraicError::CountOverflow)?;
+        leaf.digest ^= element.residual();
+        let multiplicity = self.elements.entry((key, element.digest())).or_insert(0);
+        *multiplicity = multiplicity
+            .checked_add(1)
+            .ok_or(AlgebraicError::CountOverflow)?;
+        self.len = self
+            .len
+            .checked_add(1)
+            .ok_or(AlgebraicError::CountOverflow)?;
+        Ok(())
+    }
+
+    /// Removes one matching element, updating its cached leaf.
+    ///
+    /// Returns `false` when the element is not present. Insertion and removal
+    /// are the same XOR toggle, so a removal does not need to know whether the
+    /// element was local or remote.
+    pub fn remove(&mut self, element: FixedWindowElementHash) -> bool {
+        let key = element.bucket_key();
+        let element_key = (key, element.digest());
+        let Some(multiplicity) = self.elements.get_mut(&element_key) else {
+            return false;
+        };
+        if *multiplicity == 1 {
+            self.elements.remove(&element_key);
+        } else {
+            *multiplicity = multiplicity.saturating_sub(1);
+        }
+
+        let index = self.leaf_index(key);
+        let leaf = &mut self.leaves[index];
+        // The element was validated on insert, so this cannot fail; keeping the
+        // result non-panicking makes `remove` safe for callers that race a
+        // concurrent mutation.
+        let _ = leaf.sketch.toggle(element.sketch_element());
+        leaf.count = leaf.count.saturating_sub(1);
+        leaf.digest ^= element.residual();
+        self.len = self.len.saturating_sub(1);
+        true
+    }
+
+    /// Builds one sketch per validated bucket request.
+    ///
+    /// # Errors
+    /// Returns an error for malformed requests, invalid capacities, or a
+    /// sketch element outside the nonzero field-element universe.
+    pub fn bucket_sketches(
+        &self,
+        requests: &[BucketRequest],
+    ) -> Result<Vec<Gf256Sketch>, AlgebraicError> {
+        crate::triage::validate_adaptive_bucket_requests(requests)?;
+        requests
+            .iter()
+            .map(|request| self.node_for(request).map(|(sketch, _)| sketch))
+            .collect()
+    }
+
+    /// Builds sketches and summaries for validated bucket requests.
+    ///
+    /// # Errors
+    /// Same as [`Self::bucket_sketches`].
+    pub fn bucket_nodes(
+        &self,
+        requests: &[BucketRequest],
+    ) -> Result<Vec<(Gf256Sketch, NodeSummary)>, AlgebraicError> {
+        crate::triage::validate_adaptive_bucket_requests(requests)?;
+        requests
+            .iter()
+            .map(|request| self.node_for(request))
+            .collect()
+    }
+
+    fn leaf_index(&self, key: u64) -> usize {
+        if self.depth == 0 {
+            0
+        } else {
+            let shift = 64_u32.saturating_sub(u32::from(self.depth));
+            usize::try_from(key >> shift).unwrap_or(0)
+        }
+    }
+
+    fn leaf_range(&self, request: &BucketRequest) -> (usize, usize) {
+        let shift = self.depth.saturating_sub(request.depth);
+        let first = request.prefix << shift;
+        let last = request.prefix.saturating_add(1) << shift;
+        (
+            usize::try_from(first).unwrap_or(0),
+            usize::try_from(last).unwrap_or(self.leaves.len()),
+        )
+    }
+
+    fn node_for(
+        &self,
+        request: &BucketRequest,
+    ) -> Result<(Gf256Sketch, NodeSummary), AlgebraicError> {
+        if request.depth <= self.depth && request.capacity <= CACHED_LEAF_CAPACITY {
+            let (first, last) = self.leaf_range(request);
+            let mut sketch = Gf256Sketch::new(request.capacity)?;
+            let mut summary = NodeSummary::default();
+            for leaf in &self.leaves[first..last] {
+                sketch.xor_prefix(&leaf.sketch, request.capacity)?;
+                summary.count = summary
+                    .count
+                    .checked_add(leaf.count)
+                    .ok_or(AlgebraicError::CountOverflow)?;
+                summary.digest ^= leaf.digest;
+            }
+            Ok((sketch, summary))
+        } else {
+            self.scan_node(request)
+        }
+    }
+
+    fn scan_node(
+        &self,
+        request: &BucketRequest,
+    ) -> Result<(Gf256Sketch, NodeSummary), AlgebraicError> {
+        let mut sketch = Gf256Sketch::new(request.capacity)?;
+        let mut summary = NodeSummary::default();
+        if request.depth == 0 {
+            for (&(_, digest), &multiplicity) in &self.elements {
+                Self::add_repeated(
+                    &mut sketch,
+                    &mut summary,
+                    FixedWindowElementHash::from_digest32(digest),
+                    multiplicity,
+                )?;
+            }
+        } else {
+            let shift = 64_u32.saturating_sub(u32::from(request.depth));
+            let start = request.prefix << shift;
+            let start_key = (start, [0; 32]);
+            let width = 1_u64 << shift;
+            if let Some(end) = start.checked_add(width) {
+                for (&(_, digest), &multiplicity) in self.elements.range(start_key..(end, [0; 32]))
+                {
+                    Self::add_repeated(
+                        &mut sketch,
+                        &mut summary,
+                        FixedWindowElementHash::from_digest32(digest),
+                        multiplicity,
+                    )?;
+                }
+            } else {
+                // The last depth-32 prefix ends at 2^64, which is not a valid
+                // `u64` range bound. An unbounded tail includes it exactly.
+                for (&(_, digest), &multiplicity) in self.elements.range(start_key..) {
+                    Self::add_repeated(
+                        &mut sketch,
+                        &mut summary,
+                        FixedWindowElementHash::from_digest32(digest),
+                        multiplicity,
+                    )?;
+                }
+            }
+        }
+        Ok((sketch, summary))
+    }
+
+    fn add_repeated(
+        sketch: &mut Gf256Sketch,
+        summary: &mut NodeSummary,
+        element: FixedWindowElementHash,
+        multiplicity: u64,
+    ) -> Result<(), AlgebraicError> {
+        // `multiplicity` copies of the same element toggle the sketch (and
+        // the residual digest) only when the count is odd; the count always
+        // adds the full multiplicity.
+        if multiplicity % 2 == 1 {
+            sketch.toggle(element.sketch_element())?;
+            summary.digest ^= element.residual();
+        }
+        summary.count = summary
+            .count
+            .checked_add(multiplicity)
+            .ok_or(AlgebraicError::CountOverflow)?;
+        Ok(())
+    }
+}
+
+/// Builds GF(2^256) full-digest sketches for localized bucket requests.
+///
+/// The population must be indexed by `FixedWindowPopulation`; this cannot be
+/// derived from `SortedPopulation`, which has already discarded digest bytes.
+///
+/// # Errors
+/// Returns an error when requests are invalid or a capacity is unsupported.
+pub fn build_gf256_bucket_sketches(
+    population: &FixedWindowPopulation,
+    requests: &[BucketRequest],
+) -> Result<Vec<Gf256Sketch>, AlgebraicError> {
+    crate::triage::validate_adaptive_bucket_requests(requests)?;
+    let mut sketches = Vec::with_capacity(requests.len());
+    for request in requests {
+        let mut sketch = Gf256Sketch::new(request.capacity)?;
+        for element in &population.elements[population.bucket_range(request)] {
+            sketch.toggle(element.sketch_element())?;
+        }
+        sketches.push(sketch);
+    }
+    Ok(sketches)
+}
+
+/// Builds GF(2^256) full-digest sketches and matching existing node summaries.
+///
+/// # Errors
+/// Returns an error when requests are invalid or a capacity is unsupported.
+pub fn build_gf256_bucket_nodes(
+    population: &FixedWindowPopulation,
+    requests: &[BucketRequest],
+) -> Result<Vec<(Gf256Sketch, NodeSummary)>, AlgebraicError> {
+    crate::triage::validate_adaptive_bucket_requests(requests)?;
+    let mut nodes = Vec::with_capacity(requests.len());
+    for request in requests {
+        let range = population.bucket_range(request);
+        let mut sketch = Gf256Sketch::new(request.capacity)?;
+        let mut summary_count = 0_u64;
+        let mut summary_digest = 0_u128;
+        for element in &population.elements[range] {
+            sketch.toggle(element.sketch_element())?;
+            summary_count = summary_count
+                .checked_add(1)
+                .ok_or(AlgebraicError::CountOverflow)?;
+            summary_digest ^= element.residual();
+        }
+        nodes.push((
+            sketch,
+            NodeSummary {
+                count: summary_count,
+                digest: summary_digest,
+            },
+        ));
+    }
+    Ok(nodes)
 }
 
 /// A population sorted by `(h64, h128)`, with the two columns kept aligned.
@@ -558,6 +1061,40 @@ mod tests {
     use alloc::vec::Vec;
     use core::fmt;
 
+    #[test]
+    fn fixed_window_bucket_builder_uses_big_endian_prefixes_and_full_elements() {
+        let mut in_bucket = [0_u8; 32];
+        in_bucket[..8].copy_from_slice(&0x1200_0000_0000_1234_u64.to_be_bytes());
+        in_bucket[8..16].copy_from_slice(&7_u64.to_be_bytes());
+        in_bucket[31] = 1;
+        let mut other_bucket = [0_u8; 32];
+        other_bucket[..8].copy_from_slice(&0x9200_0000_0000_1234_u64.to_be_bytes());
+        other_bucket[31] = 2;
+        let population = FixedWindowPopulation::new(vec![
+            FixedWindowElementHash::from_digest32(other_bucket),
+            FixedWindowElementHash::from_digest32(in_bucket),
+        ])
+        .unwrap();
+        let request = BucketRequest::new(8, 0x12, 4);
+        let built = population.bucket_nodes(&[request]).unwrap();
+        assert_eq!(built.len(), 1);
+        assert_eq!(built[0].0.capacity(), 4);
+        assert_eq!(built[0].1.count, 1);
+        assert_eq!(built[0].1.digest, 1);
+        assert_eq!(
+            built[0].0.coordinates()[0],
+            FixedWindowElementHash::from_digest32(in_bucket).sketch_element()
+        );
+    }
+
+    #[test]
+    fn fixed_window_population_rejects_zero_digest() {
+        assert_eq!(
+            FixedWindowPopulation::new(vec![FixedWindowElementHash::from_digest32([0; 32])]),
+            Err(AlgebraicError::ZeroSketchElement)
+        );
+    }
+
     #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
     struct MockId(String);
 
@@ -610,6 +1147,17 @@ mod tests {
         fn event_hash(&self, id: &MockId) -> Result<ElementHash, AlgebraicError> {
             Ok(ElementHash::from_opaque_bytes(id.0.as_bytes()))
         }
+
+        fn fixed_window_hash(&self, id: &MockId) -> Result<FixedWindowElementHash, AlgebraicError> {
+            Ok(mock_fixed_hash(&id.0))
+        }
+    }
+
+    fn mock_fixed_hash(id: &str) -> FixedWindowElementHash {
+        let seed = id
+            .bytes()
+            .fold(7_u64, |acc, b| acc.wrapping_mul(131) ^ u64::from(b));
+        FixedWindowElementHash::from_digest32(crate::test_util::digest32(seed))
     }
 
     fn id(s: &str) -> MockId {
@@ -751,6 +1299,34 @@ mod tests {
 
         assert_eq!(digest.digest(), expected.digest());
         assert_eq!(digest.known_event_count(), 1);
+    }
+
+    #[test]
+    fn fixed_window_frame_digest_uses_full_digest_residuals() {
+        let mut graph = MockGraph::new();
+        graph.add_edge("$genesis", "$anchor");
+        graph.add_edge("$anchor", "$child1");
+        graph.add_edge("$anchor", "$child2");
+        graph.add_edge("$child1", "$grandchild");
+        graph.add_edge("$child2", "$grandchild");
+
+        let digest = compute_fixed_window_frame_digest(
+            RoomEventIdKind::ReferenceHash,
+            &graph,
+            &[id("$anchor")],
+        )
+        .unwrap();
+
+        let mut expected = RoomAccumulator::new();
+        for name in ["$child1", "$child2", "$grandchild"] {
+            expected.insert(mock_fixed_hash(name)).unwrap();
+        }
+        assert_eq!(digest, expected);
+        assert_eq!(digest.known_event_count(), 3);
+        // The legacy fold over the same frame is a different digest.
+        let legacy =
+            compute_frame_digest(RoomEventIdKind::ReferenceHash, &graph, &[id("$anchor")]).unwrap();
+        assert_ne!(legacy.digest(), digest.digest());
     }
 
     #[test]
@@ -1291,5 +1867,198 @@ mod tests {
         let right = population.node_summary((1, 1)).unwrap();
         assert_eq!((right.count, right.digest), (1, 0x7));
         assert_eq!(population.node_summary((1, 0)).unwrap().count, 2);
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod incremental_tests {
+    use super::*;
+    use crate::test_util::digest32;
+    use alloc::vec;
+
+    fn elements(count: usize) -> Vec<FixedWindowElementHash> {
+        (0..count)
+            .map(|index| {
+                FixedWindowElementHash::from_digest32(digest32(
+                    u64::try_from(index).expect("test index fits u64"),
+                ))
+            })
+            .collect()
+    }
+
+    fn assert_same(
+        cached: &IncrementalFixedWindowPopulation,
+        cold: &FixedWindowPopulation,
+        requests: &[BucketRequest],
+    ) {
+        let cached_nodes = cached
+            .bucket_nodes(requests)
+            .unwrap_or_else(|error| panic!("cached failed with {error:?} for {requests:?}"));
+        let cold_nodes = cold
+            .bucket_nodes(requests)
+            .unwrap_or_else(|error| panic!("cold failed with {error:?} for {requests:?}"));
+        assert_eq!(
+            cached_nodes, cold_nodes,
+            "cached and cold nodes differ for {requests:?}"
+        );
+    }
+
+    #[test]
+    fn cached_ancestors_and_descendants_match_the_cold_population() {
+        let all = elements(513);
+        let cold = FixedWindowPopulation::new(all.clone()).unwrap();
+
+        for cache_depth in [0_u8, 1, 4, DEFAULT_BUCKET_CACHE_DEPTH] {
+            let cached = IncrementalFixedWindowPopulation::new(all.clone(), cache_depth).unwrap();
+            assert_eq!(cached.len(), all.len());
+
+            // Every prefix at or above the cached depth is answered by XORing
+            // leaf sketches and summaries.
+            for depth in 0..=cache_depth {
+                let bucket_count = 1_u64 << depth;
+                for capacity in [1_usize, 8, CACHED_LEAF_CAPACITY] {
+                    let requests: Vec<_> = (0..bucket_count)
+                        .map(|prefix| BucketRequest::new(depth, prefix, capacity))
+                        .collect();
+                    assert_same(&cached, &cold, &requests);
+                }
+            }
+
+            // Deeper splits are answered by scanning only their leaf.
+            for depth in (cache_depth + 1)..=crate::MAX_DEPTH.min(cache_depth + 3) {
+                let bucket_count = 1_u64 << depth;
+                let mut prefixes = alloc::vec![0, bucket_count / 2, bucket_count - 1];
+                prefixes.sort_unstable();
+                prefixes.dedup();
+                let requests: Vec<_> = prefixes
+                    .into_iter()
+                    .map(|prefix| BucketRequest::new(depth, prefix, 8))
+                    .collect();
+                assert_same(&cached, &cold, &requests);
+            }
+        }
+    }
+
+    #[test]
+    fn overflow_capacity_falls_back_to_the_exact_prefix_scan() {
+        let all = elements(300);
+        let cold = FixedWindowPopulation::new(all.clone()).unwrap();
+        let cached =
+            IncrementalFixedWindowPopulation::new(all, DEFAULT_BUCKET_CACHE_DEPTH).unwrap();
+        for (depth, prefix) in [(0_u8, 0_u64), (3, 5), (7, 99)] {
+            let request = BucketRequest::with_overflow(depth, prefix, 256);
+            assert_same(&cached, &cold, &[request]);
+        }
+    }
+
+    #[test]
+    fn insert_and_remove_toggle_one_cached_leaf() {
+        let all = elements(200);
+        let mut cached = IncrementalFixedWindowPopulation::new(Vec::new(), 4).unwrap();
+        for element in &all {
+            cached.insert(*element).unwrap();
+        }
+        let cold = FixedWindowPopulation::new(all.clone()).unwrap();
+        assert_same(
+            &cached,
+            &cold,
+            &[BucketRequest::new(0, 0, CACHED_LEAF_CAPACITY)],
+        );
+
+        for element in &all[..80] {
+            assert!(cached.remove(*element));
+            assert!(!cached.remove(*element));
+        }
+        // Exercise the scan path after removal, not just the cached leaves.
+        assert_same(
+            &cached,
+            &FixedWindowPopulation::new(all[80..].to_vec()).unwrap(),
+            &[BucketRequest::with_overflow(0, 0, 256)],
+        );
+        let remaining = all[80..].to_vec();
+        let cold = FixedWindowPopulation::new(remaining).unwrap();
+        assert_eq!(cached.len(), all.len() - 80);
+        assert_same(
+            &cached,
+            &cold,
+            &[BucketRequest::new(0, 0, CACHED_LEAF_CAPACITY)],
+        );
+
+        for element in &all[..80] {
+            cached.insert(*element).unwrap();
+        }
+        let cold = FixedWindowPopulation::new(all).unwrap();
+        assert_same(
+            &cached,
+            &cold,
+            &[BucketRequest::new(0, 0, CACHED_LEAF_CAPACITY)],
+        );
+    }
+
+    #[test]
+    fn deepest_prefix_includes_the_largest_bucket_key() {
+        let element = FixedWindowElementHash::from_digest32([0xFF; 32]);
+        let cold = FixedWindowPopulation::new(vec![element]).unwrap();
+        let cached =
+            IncrementalFixedWindowPopulation::new([element], DEFAULT_BUCKET_CACHE_DEPTH).unwrap();
+        assert_same(
+            &cached,
+            &cold,
+            &[BucketRequest::new(
+                crate::MAX_DEPTH,
+                (1_u64 << crate::MAX_DEPTH) - 1,
+                CACHED_LEAF_CAPACITY,
+            )],
+        );
+    }
+
+    #[test]
+    fn duplicate_elements_keep_their_multiplicity() {
+        let element = FixedWindowElementHash::from_digest32(digest32(7));
+        let mut cached = IncrementalFixedWindowPopulation::new([element, element], 3).unwrap();
+        assert_eq!(cached.len(), 2);
+        assert_same(
+            &cached,
+            &FixedWindowPopulation::new(vec![element, element]).unwrap(),
+            &[BucketRequest::new(0, 0, CACHED_LEAF_CAPACITY)],
+        );
+
+        assert!(cached.remove(element));
+        assert_eq!(cached.len(), 1);
+        assert_same(
+            &cached,
+            &FixedWindowPopulation::new(vec![element]).unwrap(),
+            &[BucketRequest::new(0, 0, CACHED_LEAF_CAPACITY)],
+        );
+        // An overflow request takes the scan path over `elements`, so a stale
+        // multiplicity would show up here even though the cached leaf is right.
+        assert_same(
+            &cached,
+            &FixedWindowPopulation::new(vec![element]).unwrap(),
+            &[BucketRequest::with_overflow(0, 0, 256)],
+        );
+
+        assert!(cached.remove(element));
+        assert!(cached.is_empty());
+        assert_same(
+            &cached,
+            &FixedWindowPopulation::new(Vec::new()).unwrap(),
+            &[BucketRequest::new(0, 0, CACHED_LEAF_CAPACITY)],
+        );
+        assert!(!cached.remove(element));
+    }
+
+    #[test]
+    fn rejects_too_deep_caches_and_zero_elements() {
+        assert_eq!(
+            IncrementalFixedWindowPopulation::new(Vec::new(), DEFAULT_BUCKET_CACHE_DEPTH + 1),
+            Err(AlgebraicError::InvalidBucketIndex)
+        );
+        let mut cached = IncrementalFixedWindowPopulation::new(Vec::new(), 3).unwrap();
+        assert_eq!(
+            cached.insert(FixedWindowElementHash::from_digest32([0; 32])),
+            Err(AlgebraicError::ZeroSketchElement)
+        );
     }
 }

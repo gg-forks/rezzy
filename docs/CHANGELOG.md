@@ -26,6 +26,20 @@
   only one fork cites can authorize a later conflicted event. The result still
   restores the unconflicted state.
 
+### Added
+
+- **Run containers in `Bitmap`.** Each 65,536-value chunk can hold its values as
+  a sorted `u16` array, an 8 KiB bitset, or an in-memory `(start, length - 1)`
+  run list. Membership, insertion, removal, iteration and the
+  union/intersection/difference operations handle all three. Containers are
+  canonicalized at `encode`, not on every mutation, so a size boundary cannot
+  thrash on alternating insert/erase; `Bitmap` equality compares contents, not
+  the in-memory container kind. The wire format is unchanged: version 1 still
+  has only the array and bitset chunk kinds, and run containers are materialized
+  as one of those at `encode`. A chunk kind of 2 is rejected with
+  `InvalidChunkKind`, so runs gain no on-disk compression. This does not change
+  the reverse-edge schema.
+
 ### Changed (breaking)
 
 - `LeanEvent::is_power_event` and `route_power_events` take a `StateResVersion`.
