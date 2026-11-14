@@ -35,7 +35,27 @@ fn derive(passphrase: &[u8], salt: &[u8], m: u32, t: u32, p: u32) -> Result<[u8;
     Ok(key)
 }
 
+/// Encrypt `plaintext` with explicit Argon2id costs `(m_cost KiB, t_cost, lanes)`.
+///
+/// Only compiled for this crate's own tests, so shipped builds cannot write
+/// low-cost key files. `encrypt-key` goes through [`seal`], pinned to the
+/// production costs. The costs must be within the bounds `open` accepts.
+///
+/// # Errors
+/// Returns an error if the costs are out of bounds, or the RNG, KDF, or cipher fails.
+#[cfg(test)]
 fn seal_with(
+    plaintext: &[u8],
+    passphrase: &[u8],
+    (m, t, p): (u32, u32, u32),
+) -> Result<Vec<u8>, String> {
+    if m > MAX_M_COST_KIB || t == 0 || t > MAX_T_COST || p == 0 || p > MAX_LANES {
+        return Err("KDF costs outside the range `open` accepts".to_owned());
+    }
+    seal_impl(plaintext, passphrase, (m, t, p))
+}
+
+fn seal_impl(
     plaintext: &[u8],
     passphrase: &[u8],
     (m, t, p): (u32, u32, u32),
@@ -78,7 +98,7 @@ fn seal_with(
 /// # Errors
 /// Returns an error if the RNG, KDF, or cipher fails.
 pub fn seal(plaintext: &[u8], passphrase: &[u8]) -> Result<Vec<u8>, String> {
-    seal_with(
+    seal_impl(
         plaintext,
         passphrase,
         (DEFAULT_M_COST_KIB, DEFAULT_T_COST, DEFAULT_LANES),
@@ -158,6 +178,22 @@ mod tests {
         let mut f = seal_with(b"x", b"pw", FAST).unwrap();
         f[8..12].copy_from_slice(&u32::MAX.to_be_bytes());
         assert!(open(&f, b"pw").unwrap_err().contains("unsupported"));
+    }
+
+    #[test]
+    fn out_of_range_costs_rejected() {
+        for costs in [
+            (MAX_M_COST_KIB + 1, 1, 1),
+            (8, 0, 1),
+            (8, MAX_T_COST + 1, 1),
+            (8, 1, 0),
+            (8, 1, MAX_LANES + 1),
+        ] {
+            assert!(
+                seal_with(b"x", b"pw", costs).is_err(),
+                "accepted costs {costs:?}"
+            );
+        }
     }
 
     #[test]

@@ -26,6 +26,14 @@ const PDU: &str = r#"{"auth_events":["$sbusQdJu8vp4mYghGgIdFrz9K_UbSNVmVr3UBxLM2
 /// 32 bytes (0..31), base64 without padding: a valid, throwaway ed25519 seed.
 const KEY_LINE: &str = "ed25519 test AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
 
+/// A throwaway key sealed with deliberately low Argon2 costs `(m=8, t=1, p=1)`.
+///
+/// Every `rezzy` subprocess decrypts this file, so using the production 64 MiB
+/// KDF here made each test pay a full interactive-strength derivation. `open`
+/// already accepts these header-declared costs, and the plaintext is only the
+/// throwaway `KEY_LINE` above.
+const ENCRYPTED_KEY: &[u8] = include_bytes!("fixtures/key-lowcost.enc");
+
 #[derive(Clone, Copy)]
 enum Backfill {
     /// Returns the target event.
@@ -235,15 +243,7 @@ impl Fixture {
         }
         fs::write(dir.join("base.jsonl"), lines.join("\n") + "\n").unwrap();
         fs::write(dir.join("key.plain"), format!("{KEY_LINE}\n")).unwrap();
-        let out = Command::new(env!("CARGO_BIN_EXE_rezzy"))
-            .env("REZZY_KEY_PASSPHRASE", "test")
-            .args(["federation", "encrypt-key", "-i"])
-            .arg(dir.join("key.plain"))
-            .arg("-o")
-            .arg(dir.join("key.enc"))
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "encrypt-key failed: {out:?}");
+        fs::write(dir.join("key.enc"), ENCRYPTED_KEY).unwrap();
         Self { dir }
     }
 

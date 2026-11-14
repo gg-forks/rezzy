@@ -1160,6 +1160,7 @@ pub(crate) struct PipelineBookkeeping<Id, C, K, T> {
     pub(crate) state_after_map: Vec<Option<T>>,
 }
 
+/// Allocates bookkeeping sized for `len` events under `version`.
 pub(crate) fn pipeline_bookkeeping<Id, C, K, T>(
     len: usize,
     version: StateResVersion,
@@ -2831,6 +2832,7 @@ mod tests {
     use crate::auth::StateProvider;
     use crate::basespec::event_types::M_ROOM_POWER_LEVELS;
     use crate::json;
+    use crate::state::lthash::FromState;
     use alloc::string::ToString;
     use alloc::vec;
     use std::collections::BTreeSet;

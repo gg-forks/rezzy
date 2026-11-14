@@ -17,13 +17,22 @@ extern crate alloc;
 pub use rezzy_log::{debug, error, info, trace, warn};
 
 pub mod algebraic;
+pub(crate) mod binary_field;
 pub mod bitmap;
 pub mod client;
+pub mod gf256;
+pub mod gf256_exchange;
+mod gf256_simd;
 pub mod gf64;
 pub mod gf64_simd;
+pub mod gf8;
+pub mod incremental;
 mod pinsketch;
+pub mod reed_solomon;
 pub mod resident;
 pub mod server;
+#[cfg(test)]
+mod test_util;
 pub mod triage;
 pub mod verify;
 
@@ -46,29 +55,43 @@ pub const MAX_DEPTH: u8 = 32;
 pub const H64_TRIE_WIDTH: u8 = 64;
 
 pub use algebraic::{
-    gf64_mul, verify_residual, AlgebraicError, ElementHash, EventIdFormat, RoomAccumulator,
-    RoomEventIdKind, SyndromeSketch, MAX_LOCAL_SKETCH_DECODE_CAPACITY,
-    MAX_OVERFLOW_SKETCH_CAPACITY, MAX_SKETCH_CAPACITY,
+    gf64_mul, verify_residual, AccumulatedElement, AlgebraicError, ElementHash, EventIdFormat,
+    FixedWindowElementHash, RoomAccumulator, RoomEventIdKind, SyndromeSketch,
+    MAX_LOCAL_SKETCH_DECODE_CAPACITY, MAX_OVERFLOW_SKETCH_CAPACITY, MAX_SKETCH_CAPACITY,
 };
 pub use client::{
-    should_narrow, BucketExchange, ClientAction, ReconciliationClient, RemoteDigest,
-    MAX_BUCKETS_PER_ROUND, MAX_RECONCILIATION_ROUNDS,
+    should_narrow, BucketExchange, ClientAction, DefaultClientAction, Gf256ClientAction,
+    ReconciliationClient, RemoteDigest, MAX_BUCKETS_PER_ROUND, MAX_RECONCILIATION_ROUNDS,
+};
+pub use gf256::{Gf256, Gf256Decoder, Gf256Sketch};
+
+/// Profile identifier selected by default for full-digest reconciliation.
+pub const DEFAULT_PROFILE_ID: &str = gf256::PROFILE_ID;
+pub use gf256_exchange::{
+    subtract_gf256_payload, Gf256Action, Gf256BucketExchange, Gf256FallbackReason,
 };
 pub use resident::{
     decode_strata, encode_strata, ResidentKernel, RESIDENT_FORMAT_VERSION, RESIDENT_SERIALIZED_LEN,
     STRATA_COUNT, STRATUM_CAPACITY,
 };
 pub use server::{
-    build_bucket_nodes, build_bucket_sketches, compute_frame_digest, ForwardGraph, H64Index,
-    Population, ReconciliationContext, SortedPopulation,
+    build_bucket_nodes, build_bucket_sketches, build_gf256_bucket_nodes,
+    build_gf256_bucket_sketches, compute_fixed_window_frame_digest, compute_frame_digest,
+    FixedWindowPopulation, ForwardGraph, H64Index, IncrementalFixedWindowPopulation, Population,
+    ReconciliationContext, SortedPopulation, DEFAULT_BUCKET_CACHE_DEPTH,
 };
 pub use triage::{
-    bucket_prefix, decode_bucket_sketches, estimate_strata, recommended_bucket_decode_budget,
-    validate_overflow_bucket_requests, BucketDecodeBatch, BucketDecodeSuccess, BucketRequest,
+    bucket_prefix, decode_bucket_sketches, decode_gf256_bucket_sketches,
+    decode_gf256_bucket_sketches_with_summaries, estimate_strata, recommended_bucket_decode_budget,
+    recommended_gf256_bucket_decode_budget, validate_overflow_bucket_requests, BucketDecodeBatch,
+    BucketDecodeSuccess, BucketRequest, Gf256BucketDecodeBatch, Gf256BucketDecodeSuccess,
     NodeSummary, StrataEstimate, MAX_BATCH_FACTOR_WORK, MAX_BUCKETED_SKETCH_CAPACITY,
     MAX_OVERFLOW_BUCKET_CAPACITY, MAX_STRATA_FACTOR_WORK, NODE_SUMMARY_LEN,
 };
-pub use verify::{verify_batch, verify_decode, verify_follow_up, Classified};
+pub use verify::{
+    verify_batch, verify_decode, verify_follow_up, verify_gf256_batch, verify_gf256_decode,
+    Classified, Gf256Verified,
+};
 
 #[allow(clippy::assertions_on_constants)]
 const _: () = assert!(MAX_SKETCH_CAPACITY == 32);

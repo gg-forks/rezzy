@@ -433,6 +433,17 @@ impl Value {
     pub fn parse_bytes(input: &[u8]) -> Result<Self, Error> {
         Self::parse_scalar(input)
     }
+
+    /// Like [`Self::parse_bytes`], but rejects objects containing duplicate keys.
+    ///
+    /// Use this at trust boundaries (for example PDU ingress) so that
+    /// `{"a":1,"a":2}` cannot be read, and then signed, as `{"a":2}`.
+    ///
+    /// # Errors
+    /// Returns [`Error::DuplicateKey`] on a repeated key, otherwise as [`Self::parse_bytes`].
+    pub fn parse_bytes_strict(input: &[u8]) -> Result<Self, Error> {
+        Self::parse_scalar_with(input, true).map_err(|e| e.kind)
+    }
 }
 
 impl Index<&str> for Value {
@@ -766,6 +777,15 @@ fn write_value_into(out: &mut String, value: &Value) {
     }
 }
 
+/// Appends `value` to `out` as a quoted, escaped JSON string.
+///
+/// This is the single string-literal encoder behind every writer in this
+/// crate. It is public so callers that assemble JSON without building a
+/// [`Value`] (for example report or log output) do not reimplement escaping.
+pub fn write_json_string(out: &mut String, value: &str) {
+    write_string_into(out, value);
+}
+
 /// Writes `value` as compact canonical JSON.
 ///
 /// # Errors
@@ -839,6 +859,98 @@ where
     Ok(out)
 }
 
+/// Why a parsed [`Value`] cannot be written as Matrix canonical JSON.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CanonicalError {
+    /// A number that is not an integer: a float (`1.0`, `1e2`, `-0`) is never
+    /// canonical.
+    NonIntegerNumber,
+    /// An integer outside `[MIN_SAFE_INTEGER, MAX_SAFE_INTEGER]` (±(2^53 - 1)),
+    /// or one with a non-canonical spelling such as a leading zero.
+    IntegerOutOfRange,
+}
+
+impl fmt::Display for CanonicalError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NonIntegerNumber => f.write_str("canonical JSON forbids floating-point values"),
+            Self::IntegerOutOfRange => {
+                f.write_str("integer exceeds canonical JSON safe range (+/-(2^53-1))")
+            }
+        }
+    }
+}
+
+impl core::error::Error for CanonicalError {}
+
+fn check_canonical<F>(value: &Value, exclude: &mut F) -> Result<(), CanonicalError>
+where
+    F: FnMut(&str) -> bool,
+{
+    match value {
+        Value::Number(n) if n.is_canonical_integer() => Ok(()),
+        Value::Number(n) => {
+            if n.as_str().bytes().any(|b| matches!(b, b'.' | b'e' | b'E')) {
+                Err(CanonicalError::NonIntegerNumber)
+            } else {
+                Err(CanonicalError::IntegerOutOfRange)
+            }
+        }
+        Value::Array(items) => items.iter().try_for_each(|i| check_canonical(i, exclude)),
+        Value::Object(object) => {
+            for (key, item) in object {
+                if !exclude(key) {
+                    check_canonical(item, exclude)?;
+                }
+            }
+            Ok(())
+        }
+        Value::Null | Value::Bool(_) | Value::String(_) => Ok(()),
+    }
+}
+
+/// Writes `value` as **strict** Matrix canonical JSON: compact, keys sorted,
+/// and every number a canonical integer within ±(2^53 - 1).
+///
+/// This is the function to use for any bytes that are hashed or signed.
+/// [`write_string_value`] is the permissive counterpart: it preserves number
+/// spelling, so it will happily emit floats and out-of-range integers that
+/// other implementations reject.
+///
+/// # Errors
+/// Returns [`CanonicalError`] if any number is a float or outside the safe
+/// integer range.
+pub fn to_canonical_string(value: &Value) -> Result<String, CanonicalError> {
+    to_canonical_string_filtered(value, |_| false)
+}
+
+/// Like [`to_canonical_string`], omitting object fields selected by
+/// `exclude` (applied to keys at every depth). Omitted subtrees are not
+/// validated.
+///
+/// # Errors
+/// Returns [`CanonicalError`] if any retained number is a float or outside
+/// the safe integer range.
+pub fn to_canonical_string_filtered<F>(
+    value: &Value,
+    mut exclude: F,
+) -> Result<String, CanonicalError>
+where
+    F: FnMut(&str) -> bool,
+{
+    check_canonical(value, &mut exclude)?;
+    // Validation succeeded, and the permissive writer is infallible.
+    Ok(write_string_value_filtered(value, exclude).unwrap_or_default())
+}
+
+/// Same as [`to_canonical_string`], returning bytes.
+///
+/// # Errors
+/// See [`to_canonical_string`].
+pub fn to_canonical_bytes(value: &Value) -> Result<Vec<u8>, CanonicalError> {
+    to_canonical_string(value).map(String::into_bytes)
+}
+
 /// Canonicalizes JSON from validated raw spans, sorting decoded keys and
 /// applying last-wins duplicate semantics while omitting selected fields.
 ///
@@ -865,8 +977,9 @@ struct RawEmitter<'a, F> {
 
 impl<F: FnMut(&str) -> bool> RawEmitter<'_, F> {
     /// Appends one JSON value, excluding matching object keys at every depth.
-    /// Strict mode accepts only Matrix canonical integers; permissive mode
-    /// normalizes number spellings. Duplicate object keys use the last value.
+    /// Strict mode accepts only Matrix canonical integers and rejects duplicate
+    /// object keys; permissive mode normalizes number spellings and lets the
+    /// last duplicate key win.
     ///
     /// # Errors
     /// Returns parsing or numeric-validation errors; output may be partially
@@ -887,11 +1000,13 @@ impl<F: FnMut(&str) -> bool> RawEmitter<'_, F> {
         }
     }
 
-    /// Appends an object with decoded keys sorted and duplicate keys resolved
-    /// to their last value, omitting keys selected by `exclude`.
+    /// Appends an object with decoded keys sorted, omitting keys selected by
+    /// `exclude`. Duplicate keys resolve to their last value in permissive
+    /// mode and are rejected in strict mode, whether or not they are excluded.
     ///
     /// # Errors
-    /// Returns [`Error::InvalidToken`] for object-tokenization errors,
+    /// Returns [`Error::DuplicateKey`] for a repeated key in strict mode,
+    /// [`Error::InvalidToken`] for object-tokenization errors,
     /// [`Error::TrailingCharacters`] for trailing input, or a propagated
     /// value-emission error. Output may be partially appended.
     fn emit_object(&mut self, tokenizer: &mut Tokenizer<'_>, raw: &[u8]) -> Result<(), Error> {
@@ -900,6 +1015,13 @@ impl<F: FnMut(&str) -> bool> RawEmitter<'_, F> {
             .map_err(|_| Error::InvalidToken)?;
         finish(tokenizer, raw)?;
         members.sort_by(|a, b| a.key.as_ref().cmp(b.key.as_ref()));
+        if self.strict
+            && members
+                .windows(2)
+                .any(|pair| pair[0].key.as_ref() == pair[1].key.as_ref())
+        {
+            return Err(Error::DuplicateKey);
+        }
         self.out.push('{');
         let mut first = true;
         for index in 0..members.len() {
@@ -964,7 +1086,7 @@ impl<F: FnMut(&str) -> bool> RawEmitter<'_, F> {
 }
 
 /// Appends filtered JSON with [`RawEmitter::emit_raw`]'s numeric rules and
-/// last-value handling for duplicate object keys.
+/// duplicate-key handling (last value wins unless strict).
 ///
 /// # Errors
 /// Propagates emission errors, potentially leaving a partial value in `out`.
@@ -1065,9 +1187,13 @@ where
 /// — which is what makes this the signing path. Store 64-bit identifiers as
 /// JSON strings.
 ///
+/// Duplicate object keys are rejected, so ambiguous input cannot be signed as
+/// one of its readings.
+///
 /// # Errors
-/// Returns [`Error::InvalidNumber`] when a number violates those rules, or a
-/// parsing error for malformed JSON.
+/// Returns [`Error::InvalidNumber`] when a number violates those rules,
+/// [`Error::DuplicateKey`] for a repeated object key, or a parsing error for
+/// malformed JSON.
 pub fn write_raw_canonical_filtered_strict<F>(input: &[u8], exclude: F) -> Result<String, Error>
 where
     F: FnMut(&str) -> bool,
@@ -2479,6 +2605,111 @@ fn valid_number(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn strict_raw_writer_rejects_duplicate_keys_but_permissive_keeps_last() {
+        let input = br#"{"a":1,"a":2}"#;
+        assert_eq!(
+            crate::write_raw_canonical_filtered_strict(input, |_| false),
+            Err(crate::Error::DuplicateKey)
+        );
+        // Also when the duplicated key would be excluded, and when nested.
+        assert_eq!(
+            crate::write_raw_canonical_filtered_strict(input, |k| k == "a"),
+            Err(crate::Error::DuplicateKey)
+        );
+        assert_eq!(
+            crate::write_raw_canonical_filtered_strict(br#"{"x":{"b":1,"b":1}}"#, |_| false),
+            Err(crate::Error::DuplicateKey)
+        );
+        assert_eq!(
+            crate::write_raw_canonical_filtered_strict(br#"{"b":1,"a":2}"#, |_| false).unwrap(),
+            r#"{"a":2,"b":1}"#
+        );
+    }
+
+    #[test]
+    fn parse_bytes_strict_rejects_duplicate_keys() {
+        assert_eq!(
+            crate::Value::parse_bytes_strict(br#"{"a":1,"a":2}"#),
+            Err(crate::Error::DuplicateKey)
+        );
+        assert_eq!(
+            crate::Value::parse_bytes(br#"{"a":1,"a":2}"#).unwrap()["a"],
+            crate::Value::parse("2").unwrap()
+        );
+        assert!(crate::Value::parse_bytes_strict(br#"{"a":1,"b":2}"#).is_ok());
+    }
+
+    #[test]
+    fn public_string_encoder_matches_value_writer() {
+        for text in [
+            "plain",
+            "quote\" backslash\\",
+            "line\nfeed\r\tend",
+            "\u{0}\u{8}\u{c}\u{1f}\u{7f}",
+            "unicode é 😀 \u{2028}",
+        ] {
+            let mut encoded = String::new();
+            crate::write_json_string(&mut encoded, text);
+            assert_eq!(
+                encoded,
+                crate::write_string_value(&crate::Value::String(text.into())).unwrap(),
+                "{text:?}"
+            );
+        }
+    }
+
+    use super::{
+        to_canonical_bytes, to_canonical_string, to_canonical_string_filtered, CanonicalError,
+        Value,
+    };
+
+    fn canon(src: &str) -> Result<alloc::string::String, CanonicalError> {
+        to_canonical_string(&Value::parse(src).unwrap())
+    }
+
+    #[test]
+    fn strict_value_writer_sorts_and_compacts() {
+        assert_eq!(
+            canon(r#"{ "z": {"b":2,"a":1}, "a": [0, -5] }"#).unwrap(),
+            r#"{"a":[0,-5],"z":{"a":1,"b":2}}"#
+        );
+    }
+
+    #[test]
+    fn strict_value_writer_rejects_floats() {
+        for src in ["1.0", "1e2", "-0", "[1.5]", r#"{"a":{"b":0.1}}"#] {
+            assert_eq!(canon(src), Err(CanonicalError::NonIntegerNumber), "{src}");
+        }
+    }
+
+    #[test]
+    fn strict_value_writer_enforces_safe_range() {
+        assert!(canon("9007199254740991").is_ok());
+        assert!(canon("-9007199254740991").is_ok());
+        for src in [
+            "9007199254740992",
+            "-9007199254740992",
+            "18446744073709551615",
+            "99999999999999999999",
+        ] {
+            assert_eq!(canon(src), Err(CanonicalError::IntegerOutOfRange), "{src}");
+        }
+    }
+
+    #[test]
+    fn strict_value_writer_filter_skips_excluded_subtrees() {
+        let v = Value::parse(r#"{"keep":1,"unsigned":{"f":1.5}}"#).unwrap();
+        assert!(to_canonical_string(&v).is_err());
+        assert_eq!(
+            to_canonical_string_filtered(&v, |k| k == "unsigned").unwrap(),
+            r#"{"keep":1}"#
+        );
+        assert_eq!(
+            to_canonical_bytes(&Value::parse("[1]").unwrap()).unwrap(),
+            b"[1]"
+        );
+    }
+    #[test]
     fn small_integer_from_impls() {
         use crate::Value;
         assert_eq!(Value::from(255u8).to_string(), "255");
@@ -2601,7 +2832,7 @@ mod tests {
 
     use super::{
         write_raw_canonical_filtered, write_raw_canonical_filtered_strict, write_string_pretty,
-        write_string_value, write_string_value_filtered, Error, Value,
+        write_string_value, write_string_value_filtered, Error,
     };
     use crate::{FieldMask, ValueRef};
     use alloc::{

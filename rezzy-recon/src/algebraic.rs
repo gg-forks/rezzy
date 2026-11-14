@@ -78,6 +78,8 @@ pub enum AlgebraicError {
     BudgetExhausted,
     /// An event hashed to the reserved zero short identifier.
     ZeroShortIdentifier,
+    /// The all-zero 256-bit digest is outside the `PinSketch` element universe.
+    ZeroSketchElement,
     /// A bucket depth or prefix is out of range.
     InvalidBucketIndex,
     /// The event count overflowed.
@@ -139,6 +141,89 @@ pub struct ElementHash {
     /// to 1 because `PinSketch` identifiers must be nonzero; this aliases Q3=0
     /// with Q3=1 in the estimator only. Tree extraction still uses `h64`.
     pub q3: u64,
+}
+
+/// Full SHA-256 digest with the fixed windows used by the GF(2^256) profile.
+///
+/// This is separate from [`ElementHash`] because changing its historical
+/// first-nonzero `h64` placement rule would silently change the MSC4521
+/// profile. The fixed windows are: digest bytes `0..8` for bucket placement,
+/// `8..16` for strata, `16..32` for the residual, and all 32 bytes for the
+/// GF(2^256) sketch element.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FixedWindowElementHash {
+    digest: [u8; 32],
+}
+
+impl FixedWindowElementHash {
+    /// Stores a full digest using the fixed-window profile mapping.
+    #[must_use]
+    pub const fn from_digest32(digest: [u8; 32]) -> Self {
+        Self { digest }
+    }
+
+    /// Derives the fixed-window element from a Matrix event ID.
+    ///
+    /// # Errors
+    /// Returns an error when the ID is invalid or does not contain a 32-byte
+    /// reference hash.
+    pub fn from_matrix_event_id(
+        event_id: &str,
+        format: EventIdFormat,
+    ) -> Result<Self, AlgebraicError> {
+        ElementHash::matrix_event_digest32(event_id, format).map(Self::from_digest32)
+    }
+
+    /// Derives the fixed-window element from a Matrix event ID when the room
+    /// version's base64 alphabet is not known at the call site.
+    ///
+    /// # Errors
+    /// Returns an error when the ID is invalid under both supported alphabets.
+    pub fn from_matrix_event_id_any(event_id: &str) -> Result<Self, AlgebraicError> {
+        Self::from_matrix_event_id(event_id, EventIdFormat::V4Plus)
+            .or_else(|_| Self::from_matrix_event_id(event_id, EventIdFormat::V3))
+    }
+
+    /// Returns the original digest bytes.
+    #[must_use]
+    pub const fn digest(self) -> [u8; 32] {
+        self.digest
+    }
+
+    /// Returns digest bytes `0..8` as the bucket key (big-endian).
+    #[must_use]
+    pub fn bucket_key(self) -> u64 {
+        let mut bytes = [0; 8];
+        bytes.copy_from_slice(&self.digest[..8]);
+        u64::from_be_bytes(bytes)
+    }
+
+    /// Returns digest bytes `8..16` as the strata key (big-endian).
+    #[must_use]
+    pub fn strata_key(self) -> u64 {
+        let mut bytes = [0; 8];
+        bytes.copy_from_slice(&self.digest[8..16]);
+        u64::from_be_bytes(bytes)
+    }
+
+    /// Returns digest bytes `16..32` as the residual (big-endian).
+    #[must_use]
+    pub fn residual(self) -> u128 {
+        let mut bytes = [0; 16];
+        bytes.copy_from_slice(&self.digest[16..]);
+        u128::from_be_bytes(bytes)
+    }
+
+    /// Returns all digest bytes as the GF(2^256) polynomial-basis element.
+    pub fn sketch_element(self) -> crate::gf256::Gf256 {
+        let mut limbs = [0_u64; 4];
+        for (limb, chunk) in limbs.iter_mut().zip(self.digest.chunks_exact(8)) {
+            let mut bytes = [0_u8; 8];
+            bytes.copy_from_slice(chunk);
+            *limb = u64::from_le_bytes(bytes);
+        }
+        crate::gf256::Gf256::from_limbs(limbs)
+    }
 }
 
 impl ElementHash {
@@ -246,6 +331,59 @@ impl ElementHash {
     }
 }
 
+/// An element that can be folded into the room accumulator and the strata
+/// estimator: the legacy [`ElementHash`] or the full-digest
+/// [`FixedWindowElementHash`].
+pub trait AccumulatedElement: Copy {
+    /// The value folded by xor into the level-0 digest and node summaries (128 bits).
+    fn residual128(self) -> u128;
+    /// The 64-bit value used as the strata key. Implementations may apply the
+    /// nonzero alias here or in the resident accumulator.
+    fn strata_key(self) -> u64;
+    /// Rejects values outside the element universe.
+    ///
+    /// # Errors
+    /// Returns [`AlgebraicError::ZeroShortIdentifier`] or
+    /// [`AlgebraicError::ZeroSketchElement`] for an unusable element.
+    fn validate(self) -> Result<(), AlgebraicError>;
+}
+
+impl AccumulatedElement for ElementHash {
+    fn residual128(self) -> u128 {
+        self.h128
+    }
+
+    fn strata_key(self) -> u64 {
+        self.q3
+    }
+
+    fn validate(self) -> Result<(), AlgebraicError> {
+        if self.h64 == 0 {
+            // Defensive guard: normal construction should never yield a zero short id.
+            return Err(AlgebraicError::ZeroShortIdentifier);
+        }
+        Ok(())
+    }
+}
+
+impl AccumulatedElement for FixedWindowElementHash {
+    fn residual128(self) -> u128 {
+        self.residual()
+    }
+
+    fn strata_key(self) -> u64 {
+        Self::strata_key(self)
+    }
+
+    /// Only the all-zero 32-byte digest is rejected; zero in any window is legal.
+    fn validate(self) -> Result<(), AlgebraicError> {
+        if self.digest == [0; 32] {
+            return Err(AlgebraicError::ZeroSketchElement);
+        }
+        Ok(())
+    }
+}
+
 /// Incrementally maintained level-0 set digest and exact element count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RoomAccumulator {
@@ -286,12 +424,12 @@ impl RoomAccumulator {
     ///
     /// # Errors
     /// Returns [`AlgebraicError::CountOverflow`] at `u64::MAX` events.
-    pub fn insert(&mut self, hash: ElementHash) -> Result<(), AlgebraicError> {
+    pub fn insert(&mut self, hash: impl AccumulatedElement) -> Result<(), AlgebraicError> {
         self.count = self
             .count
             .checked_add(1)
             .ok_or(AlgebraicError::CountOverflow)?;
-        self.digest ^= hash.h128;
+        self.digest ^= hash.residual128();
         Ok(())
     }
 
@@ -299,12 +437,12 @@ impl RoomAccumulator {
     ///
     /// # Errors
     /// Returns [`AlgebraicError::CountUnderflow`] when the accumulator is empty.
-    pub fn remove(&mut self, hash: ElementHash) -> Result<(), AlgebraicError> {
+    pub fn remove(&mut self, hash: impl AccumulatedElement) -> Result<(), AlgebraicError> {
         self.count = self
             .count
             .checked_sub(1)
             .ok_or(AlgebraicError::CountUnderflow)?;
-        self.digest ^= hash.h128;
+        self.digest ^= hash.residual128();
         Ok(())
     }
 
@@ -398,6 +536,7 @@ pub struct SyndromeSketch {
 }
 
 impl SyndromeSketch {
+    /// Builds a sketch from odd syndrome coordinates, enforcing the capacity.
     pub(crate) fn from_coordinates(coordinates: Vec<u64>) -> Result<Self, AlgebraicError> {
         Self::from_coordinates_checked(coordinates, MAX_SKETCH_CAPACITY)
     }
@@ -796,6 +935,25 @@ mod tests {
         assert_eq!(hash.h64, 7);
         assert_eq!(hash.q3, 7);
         assert_eq!(hash.h128, 9);
+    }
+
+    #[test]
+    fn fixed_window_hash_uses_disjoint_digest_ranges() {
+        let mut digest = [0_u8; 32];
+        for (index, byte) in digest.iter_mut().enumerate() {
+            *byte = u8::try_from(index).unwrap();
+        }
+        let hash = FixedWindowElementHash::from_digest32(digest);
+        assert_eq!(hash.digest(), digest);
+        assert_eq!(hash.bucket_key(), 0x0001_0203_0405_0607);
+        assert_eq!(hash.strata_key(), 0x0809_0a0b_0c0d_0e0f);
+        assert_eq!(hash.residual(), 0x1011_1213_1415_1617_1819_1a1b_1c1d_1e1f);
+        assert_eq!(hash.sketch_element().to_le_bytes(), digest);
+
+        // Fixed placement preserves zero instead of scanning later chunks.
+        let zero_prefix = FixedWindowElementHash::from_digest32([0; 32]);
+        assert_eq!(zero_prefix.bucket_key(), 0);
+        assert_eq!(zero_prefix.sketch_element(), crate::gf256::Gf256::ZERO);
     }
 
     fn hash(seed: u8) -> ElementHash {

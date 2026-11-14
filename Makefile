@@ -169,13 +169,17 @@ rust/install: ##H Install rezzy binary to cargo bin, and the C ABI lib + header 
 	printf 'prefix=$(PREFIX)\nlibdir=$(LIBDIR)\nincludedir=$(INCLUDEDIR)\n\nName: rezzy\nDescription: C ABI for rezzy event hashing\nVersion: %s\nLibs: -L$${libdir} -lrezzy_ffi\nCflags: -I$${includedir}\n' \
 		"$$($(CARGO) metadata --no-deps --format-version 1 | $(PYTHON) -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="rezzy-ffi"))')" \
 		> $(DESTDIR)$(LIBDIR)/pkgconfig/rezzy.pc
+	printf 'prefix=$(PREFIX)\nlibdir=$(LIBDIR)\nincludedir=$(INCLUDEDIR)\n\nName: rezzy-ffi\nDescription: Rezzy static C ABI for cgo\nVersion: %s\nLibs: $${libdir}/librezzy_ffi.a -lpthread -ldl -lm\nCflags: -I$${includedir}\n' \
+		"$$($(CARGO) metadata --no-deps --format-version 1 | $(PYTHON) -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="rezzy-ffi"))')" \
+		> $(DESTDIR)$(LIBDIR)/pkgconfig/rezzy-ffi.pc
 	@echo "Installed to $(PREFIX); for pkg-config: export PKG_CONFIG_PATH=$(LIBDIR)/pkgconfig:\$$PKG_CONFIG_PATH"
 
 .PHONY: rust/uninstall
 rust/uninstall: ##H Uninstall rezzy binary and the C ABI files
 	-$(CARGO) uninstall rezzy-cli
 	rm -f $(DESTDIR)$(LIBDIR)/librezzy_ffi.$(DYLIB_EXT) $(DESTDIR)$(LIBDIR)/librezzy_ffi.a \
-		$(DESTDIR)$(LIBDIR)/pkgconfig/rezzy.pc $(DESTDIR)$(INCLUDEDIR)/rezzy.h
+		$(DESTDIR)$(LIBDIR)/pkgconfig/rezzy.pc $(DESTDIR)$(LIBDIR)/pkgconfig/rezzy-ffi.pc \
+		$(DESTDIR)$(INCLUDEDIR)/rezzy.h
 
 .PHONY: rust/e2e
 rust/e2e: ##H Run e2e integration test on real JSON
@@ -191,11 +195,11 @@ rust/e2e: ##H Run e2e integration test on real JSON
 rust/publish: ##H Preview package and simulate dry-run publish
 	@echo "Previewing packaged files..."
 	@echo "-----------------------------------"
-	$(CARGO) package --list
+	$(CARGO) +nightly package --workspace --list
 	@echo ""
 	@echo "Simulating publish (--dry-run)"
 	@echo "-----------------------------------"
-	$(CARGO) publish --dry-run
+	$(CARGO) +nightly publish --workspace --dry-run
 
 # Convenience aliases
 .PHONY: build test bench install clean uninstall so

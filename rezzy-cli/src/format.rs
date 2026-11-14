@@ -23,7 +23,8 @@ use crate::{Args, OutputFormat};
 use rezzy::auth::{apply_authorized_redactions_with_state_at, RedactionReport, RoomState};
 use rezzy::basespec::event_types::EventType;
 use rezzy::{resolved_state_entries, LeanEvent, StateResVersion};
-use std::collections::{BTreeSet, HashMap};
+use std::borrow::Borrow;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -147,7 +148,9 @@ pub fn run_hamt_live_walk(ctx: &FormattingContext<'_>) -> HamtLiveWalkOutput {
     } else {
         ctx.args.tie_break.as_slice()
     };
-    let raw_events: Vec<LeanEvent> = ctx.events_map.values().cloned().collect();
+    // Borrow the loaded events rather than cloning every LeanEvent (including
+    // its content JSON) just to index them by emission order.
+    let raw_events: Vec<&LeanEvent> = ctx.events_map.values().collect();
     let order = reorder_by_kahn(&raw_events, tie_break, ctx.stream_order);
     // Built once over the whole room and reused for every fork: the per-fork
     // context is transitively auth-closed, so restricting this index's forward
@@ -174,7 +177,7 @@ pub fn run_hamt_live_walk(ctx: &FormattingContext<'_>) -> HamtLiveWalkOutput {
 
     let mut child_citations: HashMap<&str, usize> = HashMap::new();
     for &i in &order {
-        let ev = &raw_events[i];
+        let ev = raw_events[i];
         let mut seen_prevs = std::collections::HashSet::new();
         for prev in &ev.prev_events {
             if seen_prevs.insert(prev.as_str()) {
@@ -209,7 +212,7 @@ pub fn run_hamt_live_walk(ctx: &FormattingContext<'_>) -> HamtLiveWalkOutput {
     let mut fork_cache: HashMap<Vec<StructuralHash>, (StateHamt, SharedStateMap)> = HashMap::new();
 
     for &i in &order {
-        let ev = &raw_events[i];
+        let ev = raw_events[i];
         processed = processed.saturating_add(1);
         if debug && processed.checked_rem(progress_interval) == Some(0) {
             eprintln!(
@@ -845,6 +848,17 @@ pub fn needs_stream_order(args: &Args) -> bool {
                 .any(OrderKey::needs_stream_order))
 }
 
+/// Whether the selected output format reads the original JSON events.
+///
+/// Summary, default, resolve-state and delta output are all derived from the
+/// parsed [`LeanEvent`](rezzy::LeanEvent) map, so building a second map of every
+/// raw event only costs memory and time.
+#[must_use]
+pub fn needs_raw_events(args: &Args) -> bool {
+    matches!(args.format, OutputFormat::Events | OutputFormat::Federation)
+        || needs_stream_order(args)
+}
+
 /// Load and validate the stream-order index for `--timeline-order synapse`.
 ///
 /// An explicit `--metadata` path is fatal on error. Auto-discovered sibling
@@ -1295,23 +1309,30 @@ fn sort_timeline_chronological(events: &mut [LeanEvent]) {
 /// frontier; a requested stream component that is unknown for an event becomes
 /// [`MISSING_STREAM_ORDER`] rather than a timestamp.
 #[must_use]
-fn reorder_by_kahn(
-    events: &[LeanEvent],
+fn reorder_by_kahn<E>(
+    events: &[E],
     keys: &[OrderKey],
     stream: Option<&StreamOrderIndex>,
-) -> Vec<usize> {
+) -> Vec<usize>
+where
+    E: Borrow<LeanEvent>,
+{
     let mut augmented_keys = keys.to_vec();
     if !augmented_keys.contains(&OrderKey::EventId) {
         augmented_keys.push(OrderKey::EventId);
     }
-    let ids: Vec<String> = events.iter().map(|event| event.event_id.clone()).collect();
+    let ids: Vec<String> = events
+        .iter()
+        .map(|event| event.borrow().event_id.clone())
+        .collect();
     let parents: Vec<Vec<String>> = events
         .iter()
-        .map(|event| event.prev_events.clone())
+        .map(|event| event.borrow().prev_events.clone())
         .collect();
     let order_keys: Vec<Vec<KeyValue>> = events
         .iter()
         .map(|event| {
+            let event = event.borrow();
             let stream_value = stream
                 .and_then(|index| index.get(&event.event_id))
                 .unwrap_or(MISSING_STREAM_ORDER);
@@ -1499,15 +1520,45 @@ pub fn format_cli_output(ctx: &FormattingContext<'_>) -> rezzy::JsonValue {
             })
         }
         OutputFormat::Hamt => format_hamt_output(ctx),
-        OutputFormat::Default => rezzy::json!({
-            "status": "success",
-            "version": ctx.version,
-            "duration_ms": ctx.duration.as_millis(),
-            "resolved_state_size": ctx.resolved_state_list.len(),
-            "auth_chain_size": ctx.auth_chain_ids.len(),
-            "state_event_ids": ctx.resolved_state_list
-        }),
+        OutputFormat::Default => {
+            let (membership, other_state_keys) = membership_counts(ctx);
+            rezzy::json!({
+                "status": "success",
+                "version": ctx.version,
+                "duration_ms": ctx.duration.as_millis(),
+                "resolved_state_size": ctx.resolved_state_list.len(),
+                "joined_members": membership.get("join").copied().unwrap_or(0),
+                "membership": membership
+                    .iter()
+                    .map(|(k, v)| (k.clone(), rezzy::json!(*v)))
+                    .collect::<BTreeMap<String, rezzy::JsonValue>>(),
+                "other_state_keys": other_state_keys,
+                "auth_chain_size": ctx.auth_chain_ids.len(),
+                "state_event_ids": ctx.resolved_state_list
+            })
+        }
     }
+}
+
+/// Count resolved `m.room.member` keys by membership, plus the non-member keys.
+fn membership_counts(ctx: &FormattingContext<'_>) -> (BTreeMap<String, usize>, usize) {
+    let mut membership: BTreeMap<String, usize> = BTreeMap::new();
+    let mut other = 0usize;
+    for ((typ, _), eid) in ctx.final_state_map {
+        if typ.as_str() == "m.room.member" {
+            let m = ctx
+                .events_map
+                .get(eid)
+                .and_then(|e| e.content.get("membership"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("unknown");
+            let n = membership.entry(m.to_string()).or_default();
+            *n = n.saturating_add(1);
+        } else {
+            other = other.saturating_add(1);
+        }
+    }
+    (membership, other)
 }
 
 #[cfg(test)]

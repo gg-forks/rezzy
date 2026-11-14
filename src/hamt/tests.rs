@@ -333,6 +333,49 @@ fn test_structural_hash_commits_to_canonical_persisted_bytes() {
 }
 
 #[test]
+fn test_canonical_key_path_hash_is_stable() {
+    use alloc::string::{String, ToString};
+    use core::fmt::Write as _;
+
+    // Any pair of length-prefixed strings; an `(EventType, String)` key encodes
+    // to the same bytes.
+    let key: (String, String) = (
+        "m.room.member".to_string(),
+        "@alice:example.org".to_string(),
+    );
+    let hash = canonical_key_path_hash(b"!room:example.org", &key);
+    assert_eq!(
+        hash,
+        key_path_hash(b"!room:example.org", &key),
+        "default routing is canonical"
+    );
+    let mut hex = String::with_capacity(64);
+    for byte in hash {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    // Pinned so a Rust `Hash` change or an accidental codec change cannot move
+    // routing and node identity without a test failure.
+    assert_eq!(
+        hex,
+        "0cb2aa2f2ab4408a3353cd968b0c1b8d822a12aa2f76cedaf8ed589f0b2a929e"
+    );
+}
+
+#[test]
+fn test_borrowed_lookups_route_like_owned_keys() {
+    use alloc::string::String;
+
+    let key = b"borrowed-routing";
+    let entries: Vec<(String, u64)> = (0..200_u64).map(|i| (alloc::format!("k{i}"), i)).collect();
+    let root = build_hamt(key, entries.clone()).expect("build");
+    for (k, v) in &entries {
+        assert_eq!(key_path_hash(key, k.as_str()), key_path_hash(key, k));
+        assert_eq!(root.get(key, k.as_str()), Some(v));
+    }
+    assert_eq!(root.get(key, "absent"), None);
+}
+
+#[test]
 fn test_verified_decode_rejects_shape_valid_node_under_wrong_storage_hash() {
     let structural_key = b"verified_decode_key";
     let root = build_hamt(structural_key, [(1_u32, 10_u64)]).expect("build root");
@@ -1373,9 +1416,9 @@ fn test_hamt_remove_propagates_resolver_error() {
 /// `build_hamt` must refuse to build past `HAMT_MAX_DEPTH`, and `insert`
 /// must surface that same failure (via `HamtMutateError`'s `From<HamtBuildError>`
 /// conversion) when a leaf-vs-leaf split it triggers can't be resolved within
-/// the remaining depth. A key type whose `Hash` impl ignores its own value
-/// forces every instance to route to the same slot at every depth, which is
-/// the only practical way to manufacture a real exhausted-depth collision.
+/// the remaining depth. A key type whose encoding ignores its own value forces
+/// every instance to route to the same slot at every depth, which is the only
+/// practical way to manufacture a real exhausted-depth collision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CollidingKey(u64);
 
@@ -1385,7 +1428,17 @@ impl Hash for CollidingKey {
     }
 }
 
-impl_u64_hamt_codec!(CollidingKey);
+/// Routing follows the key encoding, so every instance encodes to the same
+/// bytes. Decoding is never exercised: these trees stay in memory.
+impl HamtCodec for CollidingKey {
+    fn encode_hamt(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(b"always the same bytes");
+    }
+
+    fn decode_hamt(_input: &[u8], _cursor: &mut usize) -> Result<Self, &'static str> {
+        Err("CollidingKey is never decoded")
+    }
+}
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct InMemoryOnlyKey(u64);
@@ -3557,6 +3610,8 @@ fn test_bucket_index_zero_extends_past_the_last_hash_byte() {
 }
 
 #[test]
+// A universe past `u32::MAX` items needs a 64-bit `usize`.
+#[cfg(target_pointer_width = "64")]
 fn test_universe_too_large_from_index_too_large_preserves_distinct_count() {
     // The overflow-counting logic itself ("keep counting distinct items past
     // the bound") belongs to, and is already tested directly on,
@@ -3577,6 +3632,8 @@ fn test_universe_too_large_from_index_too_large_preserves_distinct_count() {
 }
 
 #[test]
+// A universe past `u32::MAX` items needs a 64-bit `usize`.
+#[cfg(target_pointer_width = "64")]
 fn test_universe_too_large_display() {
     use alloc::string::ToString;
 
@@ -3591,6 +3648,8 @@ fn test_universe_too_large_display() {
 }
 
 #[test]
+// A universe past `u32::MAX` items needs a 64-bit `usize`.
+#[cfg(target_pointer_width = "64")]
 fn test_universe_too_large_display_allocation_failed() {
     use alloc::string::ToString;
 

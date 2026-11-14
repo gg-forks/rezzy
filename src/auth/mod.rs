@@ -33,8 +33,9 @@ use crate::basespec::event_types::{
     RULE_KNOCK_RESTRICTED, RULE_PUBLIC, RULE_RESTRICTED,
 };
 use crate::basespec::rezzy_types::{
-    apply_redaction, domain_matches, is_valid_mxid, EventContent, EventId, EventLike,
-    EventProvider, EventVerifier, LeanEvent, StateKey, StateResVersion,
+    apply_redaction, domain_matches, is_acceptable_historical_mxid, is_valid_principal_identifier,
+    EventContent, EventId, EventLike, EventProvider, EventVerifier, LeanEvent, StateKey,
+    StateResVersion,
 };
 
 /// An error indicating why an event failed authorization.
@@ -523,8 +524,13 @@ pub fn check_auth<E: EventLike>(
 }
 
 /// Check whether `event` is authorized given the room state at its `prev_events`,
-/// additionally validating `auth_events` rules (2.1–2.4) against an optional
-/// [`EventProvider`].
+/// validating `auth_events` rules (2.1–2.4) against an optional
+/// [`EventProvider`] when the event reaches those checks. Create events return
+/// before the `auth_events` checks. Matching-domain `m.room.aliases` events in
+/// room versions 1–5 run those checks first when an [`EventProvider`] is
+/// supplied and `version` is not V2.2, then return before the generic
+/// sender-membership and power-level rules. V2.2 skips the `auth_events`
+/// checks.
 ///
 /// # Errors
 ///
@@ -599,8 +605,22 @@ pub fn check_auth_with_context<Id: EventId, C: EventContent, E: EventLike<Id = I
         if !event.prev_events().is_empty() {
             return Err(AuthError::CreateWithPrevEvents);
         }
-        // Rule 1.2: Check sender MXID validity for m.room.create.
-        if !is_valid_mxid(event.sender()) {
+        // Rule 1.2: Check sender MXID validity for m.room.create. Historical
+        // localparts (including uppercase) must remain acceptable for events
+        // that already exist.
+        let principal_ids = event
+            .content()
+            .get_room_version()
+            .is_some_and(crate::basespec::rezzy_types::uses_principal_identifiers);
+        if principal_ids {
+            // Cygnus and later principal-identifier rooms use opaque creators;
+            // an MXID-shaped sender is not a valid principal identifier.
+            if !is_valid_principal_identifier(event.sender()) {
+                return Err(AuthError::InvalidSyntax(
+                    "m.room.create sender must be a valid principal identifier".into(),
+                ));
+            }
+        } else if !is_acceptable_historical_mxid(event.sender()) {
             return Err(AuthError::InvalidSyntax(
                 "m.room.create sender must be a valid MXID".into(),
             ));
@@ -635,29 +655,6 @@ pub fn check_auth_with_context<Id: EventId, C: EventContent, E: EventLike<Id = I
                 "cross-domain event from sender {} rejected: room has m.federate=false",
                 event.sender()
             )));
-        }
-    }
-
-    // Rule 4 (V1–V5): m.room.aliases domain mismatch check. Removed starting
-    // v6 (v6.txt: "Rule 4 ... is removed"). This must be read from the
-    // m.room.create event's actual `content.room_version` (defaulting to "1"
-    // per spec when absent), not the collapsed `StateResVersion` enum:
-    // `StateResVersion::V2` covers real room versions 2-11 uniformly, so
-    // gating on `version == StateResVersion::V1` would only ever match real
-    // room version "1" and silently skip versions 2-5.
-    if event_type == crate::basespec::event_types::M_ROOM_ALIASES {
-        let room_version = room_version_str_or_v1(state)?;
-        if matches!(room_version, "1" | "2" | "3" | "4" | "5") {
-            let Some(state_key) = event.state_key() else {
-                return Err(AuthError::InvalidSyntax(
-                    "m.room.aliases event must have a state_key".into(),
-                ));
-            };
-            if !crate::basespec::rezzy_types::domain_matches(state_key, event.sender()) {
-                return Err(AuthError::InvalidSyntax(
-                    "m.room.aliases state_key domain must match sender domain".into(),
-                ));
-            }
         }
     }
 
@@ -709,6 +706,9 @@ pub fn check_auth_with_context<Id: EventId, C: EventContent, E: EventLike<Id = I
             M_ROOM_JOIN_RULES,
             M_ROOM_THIRD_PARTY_INVITE,
         ];
+        let cygnus_overlay = crate::basespec::rezzy_types::uses_principal_identifiers(
+            room_version_str_or_v1(state)?,
+        );
 
         // Rule 2.4 (V1–V11): auth_events must contain m.room.create
         if !version.is_v2_1_plus() {
@@ -753,7 +753,10 @@ pub fn check_auth_with_context<Id: EventId, C: EventContent, E: EventLike<Id = I
                 ));
             }
 
-            if !VALID_AUTH_TYPES.contains(&auth_type.as_ref()) {
+            let allowed_auth_type = VALID_AUTH_TYPES.contains(&auth_type.as_ref())
+                || (cygnus_overlay
+                    && crate::basespec::rezzy_types::is_cygnus_auth_event_type(&auth_type));
+            if !allowed_auth_type {
                 return Err(AuthError::InvalidSyntax(alloc::format!(
                     "unexpected event type in auth_events: {auth_type}"
                 )));
@@ -799,6 +802,41 @@ pub fn check_auth_with_context<Id: EventId, C: EventContent, E: EventLike<Id = I
                     });
                 }
             }
+        }
+    }
+
+    // Rule 4 (V1–V5): m.room.aliases domain mismatch check. Removed starting
+    // v6 (v6.txt: "Rule 4 ... is removed"). Evaluated after auth_context
+    // validation (so missing/duplicate citations or missing create event are
+    // caught), but before the generic sender-joined and power-level rules
+    // (Rule 8), matching the historical v1-v5 exemption. This must be read
+    // from the m.room.create event's actual `content.room_version` (defaulting
+    // to "1" per spec when absent), not the collapsed `StateResVersion` enum:
+    // `StateResVersion::V2` covers real room versions 2-11 uniformly, so
+    // gating on `version == StateResVersion::V1` would only ever match real
+    // room version "1" and silently skip versions 2-5.
+    if event_type == crate::basespec::event_types::M_ROOM_ALIASES {
+        let room_version = room_version_str_or_v1(state)?;
+        if matches!(room_version, "1" | "2" | "3" | "4" | "5") {
+            let Some(state_key) = event.state_key() else {
+                return Err(AuthError::InvalidSyntax(
+                    "m.room.aliases event must have a state_key".into(),
+                ));
+            };
+            // The state_key is itself the domain (including any port), so
+            // compare it with the sender's domain, not a domain extracted from it.
+            let sender_domain = event.sender().split_once(':').map(|(_, d)| d);
+            if !sender_domain.is_some_and(|d| !d.is_empty() && d.eq_ignore_ascii_case(state_key)) {
+                return Err(AuthError::InvalidSyntax(
+                    "m.room.aliases state_key domain must match sender domain".into(),
+                ));
+            }
+            // Rule 4 is the complete aliases rule for v1-v5: after the
+            // domain check, allow without running the generic power-level
+            // rule (Rule 8) or requiring joined sender membership. From v6
+            // the special rule is gone and aliases events use the ordinary
+            // state-event checks.
+            return Ok(());
         }
     }
 
@@ -1287,10 +1325,12 @@ impl<Id> Default for RedactionReport<Id> {
     }
 }
 
+/// Borrows string-backed event IDs and formats any other ID type.
 #[inline]
 pub(crate) fn event_id_to_wire_cow<Id: core::fmt::Display + 'static>(
     id: &Id,
 ) -> alloc::borrow::Cow<'_, str> {
+    // Borrow common string-backed event ID types instead of formatting them.
     let any: &dyn core::any::Any = id;
     if let Some(s) = any.downcast_ref::<alloc::string::String>() {
         return alloc::borrow::Cow::Borrowed(s.as_str());
@@ -1958,6 +1998,7 @@ pub(crate) fn get_invite_power_level<Id, C: EventContent, E: EventLike<Id = Id, 
     pl_field_or_default(state, EventLike::get_invite, DEFAULT_PL_INVITE)
 }
 
+/// Returns the room's `ban` power level, falling back to the spec default.
 pub(crate) fn get_ban_power_level<Id, C: EventContent, E: EventLike<Id = Id, Content = C>>(
     state: &impl StateProvider<Id, C, E>,
 ) -> i64 {
@@ -2349,15 +2390,24 @@ fn auth_types_for_event_core<'a>(
     auth_types
 }
 
+/// Borrowed counterpart to [`auth_types_for_event`].
+///
+/// Runs the same selection algorithm but returns the event types as
+/// `&'static str` and the state keys borrowed from the caller's inputs. Use
+/// this on hot paths that only compare, hash, or look up the pairs (for
+/// example, selecting the auth entries an event needs out of a state set)
+/// instead of allocating two `String`s per entry.
+///
+/// The lifetime is the shortest of `sender`, `state_key`, and `content`.
 #[must_use]
-pub fn auth_types_for_event(
+pub fn auth_types_for_event_ref<'a>(
     event_type: &str,
-    sender: &str,
-    state_key: Option<&str>,
-    content: &crate::json::Value,
+    sender: &'a str,
+    state_key: Option<&'a str>,
+    content: &'a crate::json::Value,
     version: StateResVersion,
     room_version: &str,
-) -> Vec<(String, String)> {
+) -> Vec<(&'static str, &'a str)> {
     let membership = content.get(FIELD_MEMBERSHIP).and_then(|v| v.as_str());
 
     let third_party_invite_token = content
@@ -2377,6 +2427,29 @@ pub fn auth_types_for_event(
         membership,
         third_party_invite_token,
         join_authorised_via_users_server,
+        version,
+        room_version,
+    )
+}
+
+/// The `(event_type, state_key)` pairs an event requires in its `auth_events`.
+///
+/// This is the allocating wrapper over [`auth_types_for_event_ref`]; prefer
+/// the borrowed form when the caller only inspects the pairs.
+#[must_use]
+pub fn auth_types_for_event(
+    event_type: &str,
+    sender: &str,
+    state_key: Option<&str>,
+    content: &crate::json::Value,
+    version: StateResVersion,
+    room_version: &str,
+) -> Vec<(String, String)> {
+    auth_types_for_event_ref(
+        event_type,
+        sender,
+        state_key,
+        content,
         version,
         room_version,
     )
@@ -2410,7 +2483,65 @@ mod tests {
     use super::*;
     use crate::basespec::event_types::M_ROOM_ALIASES;
     use crate::json;
+    use alloc::format;
     use alloc::vec;
+
+    /// The borrowed selector must select exactly the same pairs as the
+    /// allocating wrapper, including the membership-only keys and the
+    /// version-sensitive create/authorising-member rules.
+    #[test]
+    fn borrowed_auth_types_match_owned() {
+        let cases = [
+            (
+                "m.room.member",
+                Some("@target:example.org"),
+                json!({
+                    "membership": "invite",
+                    "third_party_invite": { "signed": { "token": "token" } },
+                    "join_authorised_via_users_server": "@auth:example.org",
+                }),
+            ),
+            ("m.room.member", None, json!({ "membership": "join" })),
+            ("m.room.message", None, json!({})),
+            ("m.room.create", Some(""), json!({ "room_version": "11" })),
+        ];
+        for (event_type, state_key, content) in &cases {
+            for version in [
+                StateResVersion::V1,
+                StateResVersion::V2,
+                StateResVersion::V2_1,
+            ] {
+                for room_version in ["1", "7", "11"] {
+                    let owned = auth_types_for_event(
+                        event_type,
+                        "@sender:example.org",
+                        *state_key,
+                        content,
+                        version,
+                        room_version,
+                    );
+                    let borrowed = auth_types_for_event_ref(
+                        event_type,
+                        "@sender:example.org",
+                        *state_key,
+                        content,
+                        version,
+                        room_version,
+                    );
+                    let borrowed_owned: Vec<(String, String)> = borrowed
+                        .into_iter()
+                        .map(|(event_type, state_key)| {
+                            (event_type.to_string(), state_key.to_string())
+                        })
+                        .collect();
+                    assert_eq!(
+                        owned, borrowed_owned,
+                        "selection drifted for {event_type} {state_key:?} {version:?} v{room_version}"
+                    );
+                }
+            }
+        }
+    }
 
     fn make_test_event(
         id: &str,
@@ -2423,6 +2554,19 @@ mod tests {
             event_type: ev_type.into(),
             sender: sender.into(),
             content,
+            ..Default::default()
+        }
+    }
+
+    /// An `m.room.aliases` event for `#test:example.com`, used by the aliases
+    /// rule tests.
+    fn make_aliases_event() -> LeanEvent {
+        LeanEvent {
+            event_id: "$aliases".into(),
+            event_type: M_ROOM_ALIASES.into(),
+            state_key: Some("example.com".into()),
+            sender: "@alice:example.com".into(),
+            content: json!({}),
             ..Default::default()
         }
     }
@@ -2853,14 +2997,7 @@ mod tests {
 
         // An m.room.aliases event triggers Rule 4. With no create state the
         // room-version helper uses the spec-defined v1 default.
-        let aliases_ev = LeanEvent {
-            event_id: "$aliases".into(),
-            event_type: M_ROOM_ALIASES.into(),
-            state_key: Some("#test:example.com".into()),
-            sender: "@alice:example.com".into(),
-            content: json!({}),
-            ..Default::default()
-        };
+        let aliases_ev = make_aliases_event();
         let result = check_auth_with_context(&aliases_ev, &state, StateResVersion::V1, None, None);
         // Rule 4 fires for v1-v5 and the default passes the aliases domain
         // check; missing create state is not itself an authorization error.
@@ -2868,6 +3005,89 @@ mod tests {
             result.is_ok(),
             "aliases event should still auth OK with default room version: {result:?}"
         );
+    }
+
+    #[test]
+    fn test_aliases_rule_v1_v5_allows_matching_domain_without_power_level() {
+        let mut state: RoomState = RoomState::new();
+        let mut create = make_test_event(
+            "$create",
+            M_ROOM_CREATE,
+            "@admin:example.com",
+            json!({ "room_version": "5" }),
+        );
+        create.state_key = Some(String::new());
+        state.insert((M_ROOM_CREATE.into(), String::new()), create);
+        // Power level 0 for the sender: Rule 4 must allow the event before
+        // the generic state-event power-level check runs.
+        state.insert(
+            (M_ROOM_POWER_LEVELS.into(), String::new()),
+            make_test_event(
+                "$pl",
+                M_ROOM_POWER_LEVELS,
+                "@admin:example.com",
+                json!({ "state_default": 50, "users": {} }),
+            ),
+        );
+        state.insert(
+            (M_ROOM_MEMBER.into(), "@alice:example.com".into()),
+            make_test_event(
+                "$member",
+                M_ROOM_MEMBER,
+                "@alice:example.com",
+                json!({ "membership": "join" }),
+            ),
+        );
+        let aliases = make_aliases_event();
+        let result = check_auth_with_context(&aliases, &state, StateResVersion::V2, None, None);
+        assert!(
+            result.is_ok(),
+            "v5 aliases with a matching domain must not need power level 50: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_create_accepts_historical_uppercase_mxid() {
+        let create = make_test_event(
+            "$create",
+            M_ROOM_CREATE,
+            "@Milan:tchncs.de",
+            json!({ "room_version": "10" }),
+        );
+        let result = check_auth(&create, &RoomState::new(), StateResVersion::V2, None);
+        assert!(
+            result.is_ok(),
+            "historical uppercase localparts must be accepted on create: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_cygnus_create_accepts_principal_sender() {
+        let principal = format!("@{}", "A".repeat(43));
+        let create = make_test_event(
+            "$create",
+            M_ROOM_CREATE,
+            &principal,
+            json!({ "room_version": "tk.nutra.cygnus.12" }),
+        );
+        let result = check_auth(&create, &RoomState::new(), StateResVersion::V2_1, None);
+        assert!(
+            result.is_ok(),
+            "Cygnus principals are not MXIDs but are valid senders: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_v12_create_rejects_principal_sender() {
+        let principal = format!("@{}", "A".repeat(43));
+        let create = make_test_event(
+            "$create",
+            M_ROOM_CREATE,
+            &principal,
+            json!({ "room_version": "12" }),
+        );
+        let result = check_auth(&create, &RoomState::new(), StateResVersion::V2_1, None);
+        assert!(result.is_err(), "v12 requires an MXID sender: {result:?}");
     }
 
     #[test]
