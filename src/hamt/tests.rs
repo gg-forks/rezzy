@@ -333,6 +333,49 @@ fn test_structural_hash_commits_to_canonical_persisted_bytes() {
 }
 
 #[test]
+fn test_canonical_key_path_hash_is_stable() {
+    use alloc::string::{String, ToString};
+    use core::fmt::Write as _;
+
+    // Any pair of length-prefixed strings; an `(EventType, String)` key encodes
+    // to the same bytes.
+    let key: (String, String) = (
+        "m.room.member".to_string(),
+        "@alice:example.org".to_string(),
+    );
+    let hash = canonical_key_path_hash(b"!room:example.org", &key);
+    assert_eq!(
+        hash,
+        key_path_hash(b"!room:example.org", &key),
+        "default routing is canonical"
+    );
+    let mut hex = String::with_capacity(64);
+    for byte in hash {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    // Pinned so a Rust `Hash` change or an accidental codec change cannot move
+    // routing and node identity without a test failure.
+    assert_eq!(
+        hex,
+        "0cb2aa2f2ab4408a3353cd968b0c1b8d822a12aa2f76cedaf8ed589f0b2a929e"
+    );
+}
+
+#[test]
+fn test_borrowed_lookups_route_like_owned_keys() {
+    use alloc::string::String;
+
+    let key = b"borrowed-routing";
+    let entries: Vec<(String, u64)> = (0..200_u64).map(|i| (alloc::format!("k{i}"), i)).collect();
+    let root = build_hamt(key, entries.clone()).expect("build");
+    for (k, v) in &entries {
+        assert_eq!(key_path_hash(key, k.as_str()), key_path_hash(key, k));
+        assert_eq!(root.get(key, k.as_str()), Some(v));
+    }
+    assert_eq!(root.get(key, "absent"), None);
+}
+
+#[test]
 fn test_verified_decode_rejects_shape_valid_node_under_wrong_storage_hash() {
     let structural_key = b"verified_decode_key";
     let root = build_hamt(structural_key, [(1_u32, 10_u64)]).expect("build root");
@@ -1373,9 +1416,9 @@ fn test_hamt_remove_propagates_resolver_error() {
 /// `build_hamt` must refuse to build past `HAMT_MAX_DEPTH`, and `insert`
 /// must surface that same failure (via `HamtMutateError`'s `From<HamtBuildError>`
 /// conversion) when a leaf-vs-leaf split it triggers can't be resolved within
-/// the remaining depth. A key type whose `Hash` impl ignores its own value
-/// forces every instance to route to the same slot at every depth, which is
-/// the only practical way to manufacture a real exhausted-depth collision.
+/// the remaining depth. A key type whose encoding ignores its own value forces
+/// every instance to route to the same slot at every depth, which is the only
+/// practical way to manufacture a real exhausted-depth collision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CollidingKey(u64);
 
@@ -1385,7 +1428,17 @@ impl Hash for CollidingKey {
     }
 }
 
-impl_u64_hamt_codec!(CollidingKey);
+/// Routing follows the key encoding, so every instance encodes to the same
+/// bytes. Decoding is never exercised: these trees stay in memory.
+impl HamtCodec for CollidingKey {
+    fn encode_hamt(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(b"always the same bytes");
+    }
+
+    fn decode_hamt(_input: &[u8], _cursor: &mut usize) -> Result<Self, &'static str> {
+        Err("CollidingKey is never decoded")
+    }
+}
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct InMemoryOnlyKey(u64);
@@ -3557,6 +3610,8 @@ fn test_bucket_index_zero_extends_past_the_last_hash_byte() {
 }
 
 #[test]
+// A universe past `u32::MAX` items needs a 64-bit `usize`.
+#[cfg(target_pointer_width = "64")]
 fn test_universe_too_large_from_index_too_large_preserves_distinct_count() {
     // The overflow-counting logic itself ("keep counting distinct items past
     // the bound") belongs to, and is already tested directly on,
@@ -3577,6 +3632,8 @@ fn test_universe_too_large_from_index_too_large_preserves_distinct_count() {
 }
 
 #[test]
+// A universe past `u32::MAX` items needs a 64-bit `usize`.
+#[cfg(target_pointer_width = "64")]
 fn test_universe_too_large_display() {
     use alloc::string::ToString;
 
@@ -3591,6 +3648,8 @@ fn test_universe_too_large_display() {
 }
 
 #[test]
+// A universe past `u32::MAX` items needs a 64-bit `usize`.
+#[cfg(target_pointer_width = "64")]
 fn test_universe_too_large_display_allocation_failed() {
     use alloc::string::ToString;
 
@@ -5085,4 +5144,183 @@ fn test_descend_level_rejects_leaf_routed_to_wrong_slot() {
         res,
         Err(DescendError::CorruptNode("leaf routed to wrong slot"))
     );
+}
+
+// ---------------------------------------------------------------------------
+// Colliding-pair fixture
+// ---------------------------------------------------------------------------
+
+/// Structural key for the colliding-pair fixture. Routing is keyed by the
+/// structural key, so the pinned pair only has this shape under this one.
+const COLLISION_FIXTURE_KEY: &[u8] = b"colliding-pair-fixture";
+
+/// Pinned `u64` keys whose routing hashes share their first
+/// [`COLLISION_FIXTURE_SHARED_DEPTH`] 5-bit levels: slots 19, 31, 8, 12, then
+/// diverge at depth 4 (slots 6 and 2).
+///
+/// The pair was mined with [`collision_fixture_generator`]; it is committed so
+/// the shape assertions below do not depend on hashing at test time.
+const COLLISION_FIXTURE_PAIR: (u64, u64) = (0, 462_225);
+const COLLISION_FIXTURE_SHARED_DEPTH: usize = 4;
+
+/// The number of leading 5-bit routing levels `a` and `b` have in common.
+fn routing_shared_depth(a: &StructuralHash, b: &StructuralHash) -> usize {
+    (0..HAMT_MAX_DEPTH)
+        .take_while(|depth| bucket_index(a, *depth) == bucket_index(b, *depth))
+        .count()
+}
+
+/// Regenerates [`COLLISION_FIXTURE_PAIR`] if the routing codec changes.
+///
+/// Ignored by design: mining is cheap (about 2^20 keyed hashes for four
+/// levels) but pointless on every test run. Run explicitly with:
+///
+/// ```text
+/// cargo test --release --lib collision_fixture_generator -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "generator: mines a routing-colliding pair; the result is pinned in COLLISION_FIXTURE_PAIR"]
+fn collision_fixture_generator() {
+    let first = COLLISION_FIXTURE_PAIR.0;
+    let first_hash = leaf_hash_for_key(COLLISION_FIXTURE_KEY, first);
+    for candidate in first.saturating_add(1)..50_000_000 {
+        let hash = leaf_hash_for_key(COLLISION_FIXTURE_KEY, candidate);
+        if routing_shared_depth(&first_hash, &hash) == COLLISION_FIXTURE_SHARED_DEPTH {
+            assert_eq!(
+                (first, candidate),
+                COLLISION_FIXTURE_PAIR,
+                "routing changed: update COLLISION_FIXTURE_PAIR to ({first}, {candidate})"
+            );
+            return;
+        }
+    }
+    panic!("no colliding pair found within the search budget");
+}
+
+/// Asserts a node and its whole subtree re-encode byte-for-byte after a decode,
+/// and that every node verifies against its own structural hash.
+fn assert_reencodes_stably<K, V>(node: &Arc<HamtNode<K, V>>, structural_key: &[u8])
+where
+    K: HamtCodec + Hash + PartialEq + Clone + core::fmt::Debug,
+    V: HamtCodec + Hash + PartialEq + Clone + core::fmt::Debug,
+{
+    let persisted = PersistedInternalNode::from(node.as_ref());
+    let bytes = persisted.encode_v1();
+    let decoded = PersistedInternalNode::<K, V>::decode_v1_unverified(&bytes)
+        .expect("persisted node must decode");
+    assert_eq!(decoded, persisted, "decoded node must equal its source");
+    assert_eq!(decoded.encode_v1(), bytes, "re-encoding must be stable");
+
+    let verified = PersistedInternalNode::<K, V>::decode_v1_verified(
+        &bytes,
+        structural_key,
+        node.structural_hash,
+    )
+    .expect("node must verify under its own structural hash");
+    assert_eq!(verified.structural_hash, node.structural_hash);
+    assert_eq!(verified.datamap, node.datamap);
+    assert_eq!(verified.nodemap, node.nodemap);
+    assert_eq!(verified.leaves, node.leaves);
+
+    for child in &node.children {
+        if let NodeRef::Resolved(child_node) = child {
+            assert_reencodes_stably(child_node, structural_key);
+        }
+    }
+}
+
+#[test]
+fn test_colliding_pair_fixture_shape_routing_and_reencoding() {
+    let (first, second) = COLLISION_FIXTURE_PAIR;
+    let first_hash = leaf_hash_for_key(COLLISION_FIXTURE_KEY, first);
+    let second_hash = leaf_hash_for_key(COLLISION_FIXTURE_KEY, second);
+
+    // The committed pair really collides through real, default routing.
+    assert_eq!(
+        routing_shared_depth(&first_hash, &second_hash),
+        COLLISION_FIXTURE_SHARED_DEPTH
+    );
+    assert_ne!(
+        bucket_index(&first_hash, COLLISION_FIXTURE_SHARED_DEPTH),
+        bucket_index(&second_hash, COLLISION_FIXTURE_SHARED_DEPTH)
+    );
+
+    let root = build_hamt(COLLISION_FIXTURE_KEY, [(first, 10_u64), (second, 20_u64)])
+        .expect("colliding pair must build");
+
+    // A shared path of d levels is d internal nodes with one child each plus
+    // the node where the keys diverge, which holds both leaves: d + 1 nodes.
+    assert_eq!(root.leaves.len(), 0, "root must not hold leaves");
+    assert_eq!(root.datamap, 0);
+    assert_eq!(root.nodemap.count_ones(), 1);
+    assert_eq!(manual_node_count(&root), COLLISION_FIXTURE_SHARED_DEPTH + 1);
+
+    // Walk the chain explicitly, checking the observed shape at each level
+    // rather than trusting a formula.
+    let mut node = root.clone();
+    for depth in 0..COLLISION_FIXTURE_SHARED_DEPTH {
+        assert_eq!(node.datamap, 0, "depth {depth} must not hold leaves");
+        assert_eq!(
+            node.nodemap.count_ones(),
+            1,
+            "depth {depth} must have exactly one child"
+        );
+        assert_eq!(node.children.len(), 1);
+        match &node.children[0] {
+            NodeRef::Resolved(child) => node = child.clone(),
+            NodeRef::Lazy(_) => panic!("freshly built trees are fully resolved"),
+        }
+    }
+    assert_eq!(node.leaves.len(), 2, "both leaves share the final node");
+    assert_eq!(node.datamap.count_ones(), 2);
+    assert_eq!(node.nodemap, 0);
+    assert_eq!(
+        node.leaves,
+        vec![(second, 20), (first, 10)],
+        "leaves are stored in ascending slot order"
+    );
+
+    assert_eq!(root.get(COLLISION_FIXTURE_KEY, &first), Some(&10));
+    assert_eq!(root.get(COLLISION_FIXTURE_KEY, &second), Some(&20));
+    assert_eq!(root.get(COLLISION_FIXTURE_KEY, &1), None);
+
+    assert_reencodes_stably(&root, COLLISION_FIXTURE_KEY);
+}
+
+#[test]
+fn test_colliding_pair_fixture_delete_and_rebuild() {
+    let (first, second) = COLLISION_FIXTURE_PAIR;
+    let root = build_hamt(COLLISION_FIXTURE_KEY, [(first, 10_u64), (second, 20_u64)])
+        .expect("colliding pair must build");
+
+    let mut resolver = unreachable_resolver();
+    let (after_remove, displaced, _created) = persist_mutations(
+        &root,
+        COLLISION_FIXTURE_KEY,
+        vec![(second, None)],
+        &mut resolver,
+    )
+    .expect("removing one colliding key must succeed");
+
+    assert_eq!(displaced, vec![Some(20)]);
+    assert_eq!(after_remove.get(COLLISION_FIXTURE_KEY, &second), None);
+    assert_eq!(after_remove.get(COLLISION_FIXTURE_KEY, &first), Some(&10));
+
+    // Removing one half of the pair collapses the shared chain back to a
+    // single leaf root, identical to building that state from scratch.
+    assert_eq!(manual_node_count(&after_remove), 1);
+    let rebuilt_single =
+        build_hamt(COLLISION_FIXTURE_KEY, [(first, 10_u64)]).expect("single key must build");
+    assert_eq!(after_remove.structural_hash, rebuilt_single.structural_hash);
+    assert_reencodes_stably(&after_remove, COLLISION_FIXTURE_KEY);
+
+    // Rebuilding the pair is order-independent and matches the original root.
+    let rebuilt_pair = build_hamt(COLLISION_FIXTURE_KEY, [(second, 20_u64), (first, 10_u64)])
+        .expect("pair must rebuild");
+    assert_eq!(rebuilt_pair.structural_hash, root.structural_hash);
+    assert_eq!(
+        manual_node_count(&rebuilt_pair),
+        COLLISION_FIXTURE_SHARED_DEPTH + 1
+    );
+    assert_reencodes_stably(&rebuilt_pair, COLLISION_FIXTURE_KEY);
 }

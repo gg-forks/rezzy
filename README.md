@@ -39,8 +39,18 @@ experimental V2.2 ([MSC4242]).
 use rezzy::*; // resolve_iterative_sort, LeanEvent, SharedState, StateResVersion, ...
 ```
 
-See [`docs/design_notes.md`](docs/design_notes.md) for the API overview and
-[`docs/architecture.md`](docs/architecture.md) for the design.
+## Documentation
+
+Design notes live in the `docs` submodule. A default clone leaves it empty; to
+populate it, run:
+
+```sh
+git submodule update --init --checkout docs
+```
+
+Then see [`docs/design_notes.md`](docs/design_notes.md) for the API overview and
+[`docs/architecture.md`](docs/architecture.md) for the design. Source comments
+that cite paths under `docs/` refer to the submodule.
 
 ## Development
 

@@ -3,19 +3,30 @@
 //! The accumulator itself is domain-independent and lives in
 //! [`crate::incremental::lthash`]. This module adds the MSC4500-shaped
 //! pieces that depend on room state or define Matrix-specific encodings:
-//! [`LtLattice::from_state`], [`compute_state_hash`], [`RedactionOverlay`],
+//! [`FromState::from_state`], [`compute_state_hash`], [`RedactionOverlay`],
 //! [`ResolutionInputs`], [`PduLtHash`] and [`StateDigest`]. The generic
 //! accumulator is not re-exported here; import it from [`crate::incremental`].
 
 use alloc::vec::Vec;
 
-use crate::incremental::lthash::{seed_lattice, truncate_to_u16_limit};
+use crate::incremental::lthash::truncate_to_u16_limit;
 use crate::incremental::{LtHash, LtLattice};
 
-impl<const LANES: usize> LtLattice<LANES> {
+/// Full-state construction for [`LtLattice`].
+///
+/// The lattice type now lives in `rezzy-recon`, so this state-aware constructor
+/// is an extension trait rather than an inherent method.
+pub trait FromState: Sized {
     /// Compute the full hash from a state map (non-incremental).
     #[must_use]
-    pub fn from_state<Id, K>(state: &super::at::SharedState<Id, K>) -> Self
+    fn from_state<Id, K>(state: &super::at::SharedState<Id, K>) -> Self
+    where
+        Id: crate::basespec::rezzy_types::EventId,
+        K: Ord + AsRef<str>;
+}
+
+impl<const LANES: usize> FromState for LtLattice<LANES> {
+    fn from_state<Id, K>(state: &super::at::SharedState<Id, K>) -> Self
     where
         Id: crate::basespec::rezzy_types::EventId,
         K: Ord + AsRef<str>,
@@ -59,18 +70,19 @@ impl RedactionOverlay {
     // own domain-separation tag. The event ID is appended raw, matching the
     // primary MSC4500 element encoding: it is self-delimiting under Matrix
     // event-ID syntax and must not acquire a second length prefix.
+    /// Builds the overlay element for one selected, effectively redacted event.
     #[must_use]
     pub fn seed(
         event_type: &str,
         state_key: &str,
         event_id: &(impl core::fmt::Display + ?Sized),
     ) -> Self {
-        Self(LtHash::from_lanes(seed_lattice(
+        Self(LtHash::seed_with_dst(
             Self::DST,
             event_type,
             state_key,
             &event_id,
-        )))
+        ))
     }
 
     /// Adds one effectively redacted selected state event to the overlay.

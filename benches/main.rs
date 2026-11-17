@@ -58,6 +58,12 @@ const BENCHMARKS: &[BenchmarkEntry] = &[
     },
     BenchmarkEntry {
         domain: "state",
+        name: "auth_sharing",
+        description: "AuthGraph build with repeated auth tuples; shared vs independent bitmap difference",
+        run_fn: state::auth_sharing::run,
+    },
+    BenchmarkEntry {
+        domain: "state",
         name: "resolve",
         description: "State resolution v1, v2, v2.1 benchmark matrix",
         run_fn: state::resolve::run,
@@ -119,6 +125,13 @@ const BENCHMARKS: &[BenchmarkEntry] = &[
     },
     BenchmarkEntry {
         domain: "db",
+        name: "hamt_type_scan",
+        description:
+            "Cold type-scoped scans: flat vs per-type lane, with PersistentOrdMap baseline",
+        run_fn: db::hamt_type_scan::run,
+    },
+    BenchmarkEntry {
+        domain: "db",
         name: "cumulative_rebuild",
         description: "Step-by-step state rebuild simulation (HAMT vs sorted vs XOR-fold)",
         run_fn: db::cumulative_rebuild::run,
@@ -136,6 +149,12 @@ const BENCHMARKS: &[BenchmarkEntry] = &[
         run_fn: db::hamt_audit_bitmap::run,
     },
     // --- math (Algebraic Structures & Set Reconciliation) ---
+    BenchmarkEntry {
+        domain: "math",
+        name: "gf256",
+        description: "GF(2^256) arithmetic, syndrome construction, and decoding",
+        run_fn: rezzy_bench_gf256::gf256::run,
+    },
     BenchmarkEntry {
         domain: "math",
         name: "lthash",

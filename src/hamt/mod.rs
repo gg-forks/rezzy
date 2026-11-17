@@ -1,13 +1,32 @@
-//! Generic HAMT primitives used by higher-level state handling.
+//! Content-addressed persistent HAMT (CHAMP), generic over key and value types.
+//!
+//! Keys and values are any types with a [`HamtCodec`] encoding. Nodes are
+//! immutable records addressed by a keyed BLAKE3 structural hash, writes
+//! path-copy and share every unchanged subtree, and nothing here knows what a
+//! key or value means. The Matrix room-state root record built on it lives in
+//! [`crate::state::hamt_root`].
 //!
 //! Layout:
 //! - `hash`: keyed structural hashing for subtree identity
-//! - `codec`: dense on-disk encoding for persisted internal nodes
+//! - `codec`: dense on-disk encoding for persisted internal nodes, and the
+//!   routing bytes of a key
 //! - `delta`: subtree differencing for set isolation
 //! - `audit`: multi-root reachability audit for storage GC
+//! - `reader`: lazy, verified reads of persisted nodes
 //! - `gc`: experimental incremental refcount bookkeeping for integrations
 //!   with a strictly linear root history (behind `unstable-refcount-gc`)
 //! - `tests`: regression coverage for the generic HAMT core
+//!
+//! # Routing
+//!
+//! Every default-routed operation hashes a key's [`HamtRoutingKey`] bytes,
+//! which for a [`HamtCodec`] type are its persisted encoding ([`key_path_hash`]).
+//! A tree's shape therefore depends only on the encoded keys and the structural
+//! key, never on a Rust `Hash` implementation, so the same entries give
+//! byte-identical nodes in every process, version and architecture, and a
+//! persisted tree can be read by anything that knows its codec. Lookups may
+//! pass a borrowed key (`&str` for `String`) whose routing bytes match its
+//! owned form. The `*_with_key_hash` entry points remain for custom routing.
 //!
 //! # Release notes
 //!
@@ -33,6 +52,7 @@ pub mod delta;
 #[cfg(any(test, feature = "unstable-refcount-gc"))]
 pub mod gc;
 pub mod hash;
+pub mod reader;
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -44,7 +64,8 @@ pub use audit::{
     UniverseTooLarge,
 };
 pub use codec::{
-    HamtCodec, PersistedInternalNode, HAMT_NODE_MAGIC, HAMT_ROOT_MAGIC, HAMT_WIRE_VERSION,
+    HamtCodec, HamtRoutingKey, HamtStrCodec, PersistedInternalNode, HAMT_NODE_MAGIC,
+    HAMT_ROOT_MAGIC, HAMT_WIRE_VERSION,
 };
 pub use delta::{
     diff_hamt_nodes, diff_node_hashes, isolate_delta, reachable_node_hashes,
@@ -56,6 +77,7 @@ pub use hash::{
     state_group_id_from_lthash, RootHandle, StateGroupId, StructuralHash, HAMT_CODEC_VERSION,
     HAMT_ROUTING_VERSION,
 };
+pub use reader::{HamtReadError, PersistedHamtReader};
 
 /// 256-bit routing path hash for a key in the HAMT.
 pub type KeyPathHash = StructuralHash;
@@ -225,8 +247,8 @@ impl<K, V> HamtNode<K, V> {
     #[must_use]
     pub fn get<Q>(&self, structural_key: &[u8], key: &Q) -> Option<&V>
     where
-        K: Hash + Eq + Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
+        K: Eq + Borrow<Q>,
+        Q: HamtRoutingKey + Eq + ?Sized,
     {
         let path_hash = key_path_hash(structural_key, key);
         self.get_by_path_hash(key, &path_hash)
@@ -283,9 +305,9 @@ impl<K, V> HamtNode<K, V> {
         resolver: &mut F,
     ) -> Result<Option<V>, E>
     where
-        K: Hash + Eq + Borrow<Q>,
+        K: Eq + Borrow<Q>,
         V: Clone,
-        Q: Hash + Eq + ?Sized,
+        Q: HamtRoutingKey + Eq + ?Sized,
         F: NodeResolver<K, V, E>,
     {
         let path_hash = key_path_hash(structural_key, key);
@@ -582,10 +604,26 @@ impl fmt::Display for HamtBuildError {
 
 impl core::error::Error for HamtBuildError {}
 
-fn key_path_hash<K: Hash + ?Sized>(structural_key: &[u8], key: &K) -> StructuralHash {
+/// The routing hash of `key`: a keyed hash of its [`HamtRoutingKey`] bytes.
+///
+/// Every default-routed operation (`build_hamt`, `insert`, `remove`,
+/// `persist_mutation(s)`, `get`, `search`, and the persisted reader) uses this,
+/// so a tree routes by the persisted encoding of its keys and is byte-identical
+/// across processes, versions and architectures.
+#[must_use]
+pub fn key_path_hash<K: HamtRoutingKey + ?Sized>(structural_key: &[u8], key: &K) -> StructuralHash {
+    let mut encoded = Vec::new();
+    key.encode_routing(&mut encoded);
     let mut hasher = StructuralHashBuilder::new(structural_key);
-    key.hash(&mut hasher);
+    hasher.write(&encoded);
     hasher.finalize()
+}
+
+/// The default routing hash, kept by name for callers that pass it to the
+/// `*_with_key_hash` entry points explicitly. Equal to [`key_path_hash`].
+#[must_use]
+pub fn canonical_key_path_hash<K: HamtCodec>(structural_key: &[u8], key: &K) -> StructuralHash {
+    key_path_hash(structural_key, key)
 }
 
 fn map_index(bitmap: u32, slot: usize) -> usize {
@@ -1515,7 +1553,7 @@ pub fn remove<K, V, Q, F, E>(
 where
     K: Hash + Eq + Borrow<Q> + Clone + HamtCodec,
     V: HamtValue,
-    Q: Hash + Eq + ?Sized,
+    Q: HamtRoutingKey + Eq + ?Sized,
     F: NodeResolver<K, V, E>,
 {
     let path_hash = key_path_hash(structural_key, key);
@@ -1686,14 +1724,16 @@ pub type PersistMutationsResult<K, V, E> = Result<
 /// This is for a single published state group. The returned `created` nodes must be written to
 /// storage before publishing the state group root pointer.
 ///
-/// # Custom-hash roots
+/// # Roots using an earlier or custom routing hash
 /// This always routes with the default keyed structural hash, the same one
 /// [`build_hamt`] uses. It is only correct for trees built by [`build_hamt`]
 /// (or `prev_root`s produced by a prior call to this function). Do not call
-/// this on a `prev_root` built by [`build_hamt_with_key_hash`] — it will
-/// route with the wrong hash, silently missing existing entries and leaving
-/// the tree inconsistent. Use [`persist_mutation_with_key_hash`] or the
-/// [`HamtMutator`] methods for those trees instead.
+/// this on a `prev_root` built by [`build_hamt_with_key_hash`] or by the
+/// pre-encoding default that routed via Rust's `Hash` stream. Both can use
+/// routing version 1 metadata, so that version does not identify the layout.
+/// The wrong route can miss existing entries and leave the tree inconsistent.
+/// Use [`persist_mutation_with_key_hash`] or the [`HamtMutator`] methods with
+/// the root's original routing function, or migrate the root before mutation.
 ///
 /// # Errors
 /// Returns [`HamtMutateError`] if `resolver` fails to load a lazy child or depth is exhausted.

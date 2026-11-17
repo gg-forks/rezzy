@@ -26,6 +26,14 @@ const PDU: &str = r#"{"auth_events":["$sbusQdJu8vp4mYghGgIdFrz9K_UbSNVmVr3UBxLM2
 /// 32 bytes (0..31), base64 without padding: a valid, throwaway ed25519 seed.
 const KEY_LINE: &str = "ed25519 test AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
 
+/// A throwaway key sealed with deliberately low Argon2 costs `(m=8, t=1, p=1)`.
+///
+/// Every `rezzy` subprocess decrypts this file, so using the production 64 MiB
+/// KDF here made each test pay a full interactive-strength derivation. `open`
+/// already accepts these header-declared costs, and the plaintext is only the
+/// throwaway `KEY_LINE` above.
+const ENCRYPTED_KEY: &[u8] = include_bytes!("fixtures/key-lowcost.enc");
+
 #[derive(Clone, Copy)]
 enum Backfill {
     /// Returns the target event.
@@ -46,6 +54,10 @@ enum EventShape {
     Pdu,
     /// The event endpoint returns HTTP 404 for every requested ID.
     Missing,
+    /// The event endpoint returns HTTP 500 for every requested ID.
+    Error,
+    /// The event endpoint answers 200 with an empty `pdus` list.
+    Empty,
 }
 
 struct Mock {
@@ -161,6 +173,18 @@ fn handle(
                     respond(&mut stream, 404, r#"{"errcode":"M_NOT_FOUND"}"#);
                     return;
                 }
+                EventShape::Error => {
+                    respond(&mut stream, 500, r#"{"errcode":"M_UNKNOWN"}"#);
+                    return;
+                }
+                EventShape::Empty => {
+                    respond(
+                        &mut stream,
+                        200,
+                        r#"{"origin":"mock","origin_server_ts":1,"pdus":[]}"#,
+                    );
+                    return;
+                }
             };
             respond(&mut stream, 200, &body);
         } else {
@@ -235,15 +259,7 @@ impl Fixture {
         }
         fs::write(dir.join("base.jsonl"), lines.join("\n") + "\n").unwrap();
         fs::write(dir.join("key.plain"), format!("{KEY_LINE}\n")).unwrap();
-        let out = Command::new(env!("CARGO_BIN_EXE_rezzy"))
-            .env("REZZY_KEY_PASSPHRASE", "test")
-            .args(["federation", "encrypt-key", "-i"])
-            .arg(dir.join("key.plain"))
-            .arg("-o")
-            .arg(dir.join("key.enc"))
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "encrypt-key failed: {out:?}");
+        fs::write(dir.join("key.enc"), ENCRYPTED_KEY).unwrap();
         Self { dir }
     }
 
@@ -586,15 +602,18 @@ fn resume_with_skip_tried_does_not_re_request_ids_that_already_failed() {
     let fx = Fixture::new("resume-no-retry");
     assert!(fx.gap_fill_with(&mock.url, true, "1", &[]).status.success());
     assert_eq!(mock.count(&format!("/event/{STILL_MISSING}")), 1);
-    assert!(fx
-        .gap_fill_with(&mock.url, true, "1", &["--resume", "--skip-tried"])
-        .status
-        .success());
+    let resumed = fx.gap_fill_with(&mock.url, true, "1", &["--resume", "--skip-tried"]);
+    assert!(resumed.status.success(), "{}", text(&resumed.stderr));
     assert_eq!(
         mock.count(&format!("/event/{STILL_MISSING}")),
         1,
         "failed ID asked for again: {:?}",
         mock.requests()
+    );
+    assert_eq!(
+        prev_outcome(&resumed, STILL_MISSING).0,
+        "not_found",
+        "a resumed run must reload earlier answers, not report them unanswered"
     );
 }
 
@@ -1312,4 +1331,122 @@ fn state_diff_rejects_a_room_without_the_sigil_before_any_request() {
     let fx = Fixture::new("sd-bad-room");
     let out = fx.state_diff(&[&a.url], "clearR", &[]);
     assert_rejects_room_without_sigil(&out, &a);
+}
+
+/// The outcome the report gives for one missing prev, as `(outcome, server)`.
+fn prev_outcome(out: &Output, id: &str) -> (String, String) {
+    let stdout = text(&out.stdout);
+    let value = rezzy::JsonValue::parse(stdout.trim()).expect("report is JSON");
+    let entries = value
+        .get("missing_prev_outcomes")
+        .and_then(rezzy::JsonValue::as_array)
+        .expect("report lists missing_prev_outcomes");
+    let entry = entries
+        .iter()
+        .find(|e| e.get("id").and_then(rezzy::JsonValue::as_str) == Some(id))
+        .unwrap_or_else(|| panic!("no outcome for {id}: {stdout}"));
+    let field = |name: &str| {
+        entry
+            .get(name)
+            .and_then(rezzy::JsonValue::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    (field("outcome"), field("server"))
+}
+
+/// The servers the report says were asked.
+fn queried_servers(out: &Output) -> Vec<String> {
+    let stdout = text(&out.stdout);
+    let value = rezzy::JsonValue::parse(stdout.trim()).expect("report is JSON");
+    value
+        .get("queried_servers")
+        .and_then(rezzy::JsonValue::as_array)
+        .expect("report lists queried_servers")
+        .iter()
+        .filter_map(rezzy::JsonValue::as_str)
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn a_404_from_the_server_is_reported_as_not_found_by_that_server() {
+    let (mock, _fx, out) = run("outcome-404", Backfill::Blank, EventShape::Missing);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let (outcome, server) = prev_outcome(&out, TARGET);
+    assert_eq!(outcome, "not_found");
+    assert_eq!(server, mock.url, "the answer names the server asked");
+    assert_eq!(
+        queried_servers(&out),
+        vec![mock.url],
+        "the report names the sources an answer is relative to"
+    );
+}
+
+#[test]
+fn a_found_event_is_reported_as_resolved_instead_of_inferred_from_omission() {
+    // A blank backfill falls back to fetching the target by ID, so the target
+    // is a found answer rather than an event silently dropped from the list.
+    let (_mock, _fx, out) = run("resolved-found", Backfill::Blank, EventShape::Pdus);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    let value = rezzy::JsonValue::parse(stdout.trim()).expect("report is JSON");
+    let resolved = value
+        .get("resolved")
+        .and_then(rezzy::JsonValue::as_array)
+        .expect("report lists resolved ids");
+    let entry = resolved
+        .iter()
+        .find(|entry| entry.get("id").and_then(rezzy::JsonValue::as_str) == Some(TARGET))
+        .unwrap_or_else(|| panic!("no resolved entry for {TARGET}: {stdout}"));
+    assert_eq!(
+        entry.get("outcome").and_then(rezzy::JsonValue::as_str),
+        Some("found"),
+        "a resolved id names the answer, not just its absence from the missing list"
+    );
+    let missing = value
+        .get("missing_prev_outcomes")
+        .and_then(rezzy::JsonValue::as_array)
+        .expect("report lists missing_prev_outcomes");
+    assert!(
+        !missing
+            .iter()
+            .any(|entry| { entry.get("id").and_then(rezzy::JsonValue::as_str) == Some(TARGET) }),
+        "a found event is not still listed among the missing"
+    );
+}
+
+#[test]
+fn a_server_error_is_transient_not_not_found() {
+    let (_mock, _fx, out) = run("outcome-5xx", Backfill::Blank, EventShape::Error);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let (outcome, _) = prev_outcome(&out, TARGET);
+    assert_eq!(outcome, "transient", "a 500 says nothing about the event");
+}
+
+#[test]
+fn a_200_without_the_event_is_transient_not_found_evidence() {
+    // A server can answer 200 with an empty `pdus` list. That is not the event,
+    // so it must not be reported as found while the ID stays missing.
+    let (_mock, _fx, out) = run("outcome-200-empty", Backfill::Blank, EventShape::Empty);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let (outcome, _) = prev_outcome(&out, TARGET);
+    assert_eq!(
+        outcome, "transient",
+        "a 200 that carried nothing is not a found event"
+    );
+}
+
+#[test]
+fn an_id_only_omitted_from_backfill_is_unanswered_not_not_found() {
+    // With fallback disabled a blank backfill stops the crawl, so the ID was
+    // never asked for by itself. Omitting an event from a batch is not a
+    // refusal, and the report must not turn it into one.
+    let mock = spawn_mock(Backfill::Blank, EventShape::Pdus);
+    let fx = Fixture::new("outcome-unanswered");
+    let out = fx.gap_fill_with(&mock.url, true, "1", &["--no-fallback"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let (outcome, server) = prev_outcome(&out, TARGET);
+    assert_eq!(outcome, "unanswered");
+    assert_eq!(server, mock.url);
 }
