@@ -273,6 +273,17 @@ fn encrypt_key_command() -> Command {
     Command::new("encrypt-key")
         .about("Encrypt a plaintext signing key into a passphrase-protected file")
         .arg(
+            Arg::new("bundle")
+                .long("bundle")
+                .action(ArgAction::SetTrue)
+                .requires("origin")
+                .help(
+                    "Read one key per line and write a multi-key bundle bound to --origin. A \
+                     line is a normal key form, optionally followed by created=<ms> and \
+                     retired=<ms>. Exactly one line must be active (no retired=).",
+                ),
+        )
+        .arg(
             Arg::new("origin")
                 .long("origin")
                 .env("MATRIX_ORIGIN")
@@ -437,6 +448,7 @@ pub fn run_from_matches(matches: &ArgMatches) -> Result<JsonValue, AppError> {
                 m.get_one::<PathBuf>("input").expect("required"),
                 out,
                 m.get_one::<String>("origin").map(String::as_str),
+                m.get_flag("bundle"),
             )?;
             Ok(rezzy::json!({ "written": out.display().to_string() }))
         }
@@ -475,6 +487,14 @@ pub struct SigningKeySpec {
     pub key_id: String,
     /// The parsed signing key.
     pub key: SigningKey,
+}
+
+/// The Matrix server name of an origin: scheme and path removed, port kept.
+fn server_name(origin: &str) -> &str {
+    let name = origin
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    name.split('/').next().unwrap_or(name)
 }
 
 fn domain_env_suffix(domain: &str) -> String {
@@ -563,9 +583,29 @@ pub fn load_signing_key(origin: &str, explicit: Option<&Path>) -> Result<Signing
     };
     let file = fs::read(&path).map_err(|e| err(e.to_string()))?;
     let passphrase = read_passphrase(&path, Some(origin))?;
-    let plain = crate::keyfile::open(&file, passphrase.as_bytes()).map_err(err)?;
-    let text = String::from_utf8(plain).map_err(|_| err("decrypted key is not UTF-8".into()))?;
-    let spec = parse_signing_key(&text).map_err(err)?;
+    let mut plain = rezzy_keyfile::open(&file, passphrase.as_bytes()).map_err(err)?;
+    let spec = if rezzy_keyfile::KeyBundle::is_bundle(&plain) {
+        let bundle = rezzy_keyfile::KeyBundle::decode(&plain);
+        plain.fill(0);
+        let bundle = bundle.map_err(err)?;
+        // A bundle is bound to one server name; refuse to sign as another.
+        if bundle.origin() != server_name(origin) {
+            return Err(err(format!(
+                "key bundle is for {:?}, not {:?}",
+                bundle.origin(),
+                server_name(origin)
+            )));
+        }
+        let active = bundle.active();
+        SigningKeySpec {
+            key_id: active.key_id().to_owned(),
+            key: *active.signing_key(),
+        }
+    } else {
+        let text =
+            String::from_utf8(plain).map_err(|_| err("decrypted key is not UTF-8".into()))?;
+        parse_signing_key(&text).map_err(err)?
+    };
     if let Ok(mut cache) = signing_key_cache().lock() {
         cache.insert(cache_key, spec.clone());
     }
@@ -579,7 +619,7 @@ pub fn load_signing_key(origin: &str, explicit: Option<&Path>) -> Result<Signing
 /// # Errors
 /// Returns an error on I/O failure, mismatched passphrases, or an invalid key.
 pub fn encrypt_key_file(input: &Path, output: &Path) -> Result<(), AppError> {
-    encrypt_key_file_with_origin(input, output, None)
+    encrypt_key_file_with_origin(input, output, None, false)
 }
 
 /// Encrypts a validated plaintext signing key, replacing `output`. Uses the
@@ -590,10 +630,23 @@ fn encrypt_key_file_with_origin(
     input: &Path,
     output: &Path,
     origin: Option<&str>,
+    bundle: bool,
 ) -> Result<(), AppError> {
     let err = |m: String| AppError::new(ErrorCode::SigningKey, m);
     let plain = fs::read_to_string(input)?;
-    parse_signing_key(&plain).map_err(|m| err(format!("{}: {m}", input.display())))?;
+    // A bundle is sealed from its parsed form; a single key keeps its text.
+    let key_bundle = if bundle {
+        let origin = origin.ok_or_else(|| {
+            err("--bundle needs --origin: a bundle is bound to one server".into())
+        })?;
+        Some(
+            parse_key_bundle(server_name(origin), &plain)
+                .map_err(|m| err(format!("{}: {m}", input.display())))?,
+        )
+    } else {
+        parse_signing_key(&plain).map_err(|m| err(format!("{}: {m}", input.display())))?;
+        None
+    };
     let pw = if let Some(pw) = configured_passphrase(origin) {
         pw
     } else {
@@ -607,7 +660,13 @@ fn encrypt_key_file_with_origin(
     if pw.is_empty() {
         return Err(err("empty passphrase".into()));
     }
-    let sealed = crate::keyfile::seal(plain.as_bytes(), pw.as_bytes()).map_err(err)?;
+    let sealed = key_bundle
+        .as_ref()
+        .map_or_else(
+            || rezzy_keyfile::seal(plain.as_bytes(), pw.as_bytes()),
+            |key_bundle| key_bundle.seal(pw.as_bytes()),
+        )
+        .map_err(err)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -661,6 +720,47 @@ fn parse_signing_key(text: &str) -> Result<SigningKeySpec, String> {
     })
 }
 
+/// Parses `--bundle` input: one key per line, each a normal key form followed
+/// by optional `created=<ms>` and `retired=<ms>` fields. `#` lines and blank
+/// lines are skipped.
+fn parse_key_bundle(origin: &str, text: &str) -> Result<rezzy_keyfile::KeyBundle, String> {
+    let mut keys = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line_no = index.saturating_add(1);
+        let (mut created_ms, mut retired_ms) = (0_u64, None);
+        let mut key_fields = Vec::new();
+        for token in line.split_whitespace() {
+            if let Some(value) = token.strip_prefix("created=") {
+                created_ms = value
+                    .parse()
+                    .map_err(|_| format!("line {line_no}: bad created= value"))?;
+            } else if let Some(value) = token.strip_prefix("retired=") {
+                retired_ms = Some(
+                    value
+                        .parse::<u64>()
+                        .map_err(|_| format!("line {line_no}: bad retired= value"))?,
+                );
+            } else {
+                key_fields.push(token);
+            }
+        }
+        let spec = parse_signing_key(&key_fields.join(" "))
+            .map_err(|message| format!("line {line_no}: {message}"))?;
+        let seed = <[u8; 32]>::from(spec.key);
+        keys.push(match retired_ms {
+            Some(retired) => {
+                rezzy_keyfile::KeyEntry::retired(spec.key_id, seed, created_ms, retired)
+            }
+            None => rezzy_keyfile::KeyEntry::active(spec.key_id, seed, created_ms),
+        });
+    }
+    rezzy_keyfile::KeyBundle::new(origin, keys)
+}
+
 /// The 16 bytes that precede the seed in a PKCS#8 v2 Ed25519 private key.
 const PKCS8_ED25519_PREFIX: [u8; 16] = [
     0x30, 0x51, 0x02, 0x01, 0x01, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
@@ -692,7 +792,9 @@ fn parse_conduwuit_keypair(hex: &str) -> Result<SigningKeySpec, String> {
         })
         .ok_or("conduwuit keypair has no ASCII key version")?;
     let malformed = "conduwuit keypair is not a PKCS#8 Ed25519 private key";
-    let rest = bytes[split + 1..]
+    let rest = bytes
+        .get(split.saturating_add(1)..)
+        .ok_or(malformed)?
         .strip_prefix(&PKCS8_ED25519_PREFIX)
         .ok_or(malformed)?;
     // seed, then the `[1]` public-key field `81 21 00 <pub>`, and nothing after.
@@ -1223,6 +1325,10 @@ struct Checkpoint<'a> {
     round: u32,
     /// Do not queue IDs already in `tried`, including parents found mid-crawl.
     skip_tried: bool,
+    /// Receives what the destination said about each ID asked for by itself.
+    outcomes: &'a mut BTreeMap<String, IdOutcome>,
+    /// Where `outcomes` is persisted for `destination`, next to `tried.txt`.
+    outcomes_path: Option<&'a Path>,
 }
 
 /// Records the supplied IDs as tried and persists the checkpoint, optionally
@@ -1234,6 +1340,7 @@ fn checkpoint_batch(
     state: &mut DagWalkState,
     ids: Vec<String>,
 ) -> Result<(), AppError> {
+    checkpoint.outcomes.append(&mut state.outcomes);
     if let Some(path) = checkpoint.requests_path {
         append_attempts(
             path,
@@ -1251,7 +1358,107 @@ fn checkpoint_batch(
             state.skip.insert(id);
         }
     }
+    // Persist answers before the tried set. If this write fails, the run
+    // aborts without marking the IDs tried, so a resumed --skip-tried run asks
+    // again instead of skipping an ID whose answer was never saved.
+    if let Some(path) = checkpoint.outcomes_path {
+        write_outcomes_file(path, dag_request.destination, checkpoint.outcomes)?;
+    }
     write_tried_file(checkpoint.tried_path, checkpoint.tried)
+}
+
+impl IdOutcome {
+    /// Rebuilds an outcome from a persisted line; unknown kinds are rejected
+    /// rather than guessed.
+    fn from_json(value: &JsonValue) -> Option<(String, Self)> {
+        let id = value.get("id")?.as_str()?.to_owned();
+        let kind = match value.get("outcome")?.as_str()? {
+            "found" => "found",
+            "not_found" => "not_found",
+            "refused" => "refused",
+            "transient" => "transient",
+            _ => return None,
+        };
+        let status = value
+            .get("status")
+            .and_then(JsonValue::as_u64)
+            .and_then(|n| u16::try_from(n).ok());
+        let errcode = value
+            .get("errcode")
+            .and_then(JsonValue::as_str)
+            .map(str::to_owned);
+        Some((
+            id,
+            Self {
+                kind,
+                status,
+                errcode,
+            },
+        ))
+    }
+}
+
+/// Reads the answers earlier runs recorded for `server`. Answers from other
+/// servers are not this run's evidence and are ignored. A missing file is
+/// empty; unreadable or malformed lines are errors, never silently dropped.
+fn read_outcomes_file(path: &Path, server: &str) -> Result<BTreeMap<String, IdOutcome>, AppError> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut out = BTreeMap::new();
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let value = JsonValue::parse(line).map_err(|error| {
+            AppError::new(
+                ErrorCode::IoError,
+                format!("{}: malformed outcome line: {error}", path.display()),
+            )
+        })?;
+        if value.get("server").and_then(JsonValue::as_str) != Some(server) {
+            continue;
+        }
+        let (id, outcome) = IdOutcome::from_json(&value).ok_or_else(|| {
+            AppError::new(
+                ErrorCode::IoError,
+                format!("{}: unrecognized outcome line", path.display()),
+            )
+        })?;
+        out.insert(id, outcome);
+    }
+    Ok(out)
+}
+
+/// Replaces `server`'s answers in the file, keeping every other server's lines.
+fn write_outcomes_file(
+    path: &Path,
+    server: &str,
+    outcomes: &BTreeMap<String, IdOutcome>,
+) -> Result<(), AppError> {
+    let mut text = String::new();
+    match fs::read_to_string(path) {
+        Ok(existing) => {
+            for line in existing.lines().filter(|l| !l.trim().is_empty()) {
+                let other = JsonValue::parse(line)
+                    .ok()
+                    .is_some_and(|v| v.get("server").and_then(JsonValue::as_str) != Some(server));
+                if other {
+                    text.push_str(line);
+                    text.push('\n');
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    for (id, outcome) in outcomes {
+        let mut entry = outcome.to_json();
+        let _ = entry.insert(String::from("id"), rezzy::json!(id.clone()));
+        let _ = entry.insert(String::from("server"), rezzy::json!(server));
+        text.push_str(&entry.to_string());
+        text.push('\n');
+    }
+    write_frontier_checkpoint_text(path, &text)
 }
 
 /// Formats request counts in sorted label order, separated by spaces.
@@ -1289,12 +1496,70 @@ struct DagWalkState {
     follow_prev_events: bool,
     /// IDs a resumed gap-fill run was told not to ask for again.
     skip: HashSet<String>,
+    /// What the destination said about each ID asked for by itself.
+    outcomes: BTreeMap<String, IdOutcome>,
+}
+
+/// What one server said when asked for one event by ID.
+///
+/// `NotFound` is a definite answer from that server only; it never proves the
+/// event exists nowhere. `Transient` and `Refused` are not answers about the
+/// event at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IdOutcome {
+    kind: &'static str,
+    status: Option<u16>,
+    errcode: Option<String>,
+}
+
+impl IdOutcome {
+    /// Classifies a single-event request attempt.
+    fn of(attempt: &Attempt) -> Self {
+        let kind = match attempt.status {
+            Some(200) => "found",
+            Some(404) => "not_found",
+            Some(408 | 429 | 500..=599) | None => "transient",
+            Some(_) => "refused",
+        };
+        Self {
+            kind,
+            status: attempt.status,
+            errcode: attempt.errcode.clone(),
+        }
+    }
+
+    /// A `200` that did not carry the event asked for. A success status alone
+    /// is not an answer about this event, so it stays transient rather than
+    /// claiming the event was found.
+    const fn unexpected() -> Self {
+        Self {
+            kind: "transient",
+            status: None,
+            errcode: None,
+        }
+    }
+
+    fn to_json(&self) -> JsonValue {
+        let mut value = rezzy::json!({"outcome": self.kind});
+        if let Some(status) = self.status {
+            let _ = value.insert(String::from("status"), rezzy::json!(u64::from(status)));
+        }
+        if let Some(code) = &self.errcode {
+            let _ = value.insert(String::from("errcode"), rezzy::json!(code.clone()));
+        }
+        value
+    }
 }
 
 impl DagWalkState {
     /// Counts the outcome and retains its event ID for checkpointing; retains
     /// the full attempt only when request logging is enabled.
     fn record(&mut self, attempt: Attempt) {
+        if attempt.endpoint == "event" {
+            if let Some(id) = &attempt.event_id {
+                self.outcomes.insert(id.clone(), IdOutcome::of(&attempt));
+            }
+        }
         let count = self.stats.entry(stat_label(&attempt)).or_insert(0);
         *count = count.saturating_add(1);
         if self.track_requested {
@@ -1369,6 +1634,7 @@ fn initialize_dag(
             skipped_deep: 0,
             follow_prev_events: true,
             skip: HashSet::new(),
+            outcomes: BTreeMap::new(),
         },
         max,
     ))
@@ -1532,7 +1798,19 @@ fn fetch_events_individually(
         );
         state.record(attempt_of(Some(id), "event", &result, started));
         match result {
-            Ok(v) => pdus.extend(event_pdus_from_response(v)),
+            Ok(v) => {
+                let returned = event_pdus_from_response(v);
+                // `record` classes any 200 as found, but only a response that
+                // names this event is an answer about it. Servers can answer
+                // 200 with an empty `pdus` list or a different event.
+                if !returned
+                    .iter()
+                    .any(|pdu| pdu_id(pdu, dag_request.room_version).is_some_and(|got| got == *id))
+                {
+                    state.outcomes.insert(id.clone(), IdOutcome::unexpected());
+                }
+                pdus.extend(returned);
+            }
             Err(e) if is_unreachable(&e) => {
                 state.failures.record(&e);
                 state
@@ -1545,6 +1823,16 @@ fn fetch_events_individually(
         }
     }
     pdus
+}
+
+/// The ID a fetched PDU is filed under: its own `event_id`, or the reference
+/// hash the wire omits for room v3 and later.
+fn pdu_id(pdu: &JsonValue, room_version: &str) -> Option<String> {
+    crate::repair::event_id_of(pdu).or_else(|| {
+        rezzy::reference_hash(pdu, room_version)
+            .ok()
+            .map(|hash| format!("${hash}"))
+    })
 }
 
 /// Extract event objects from the common federation event response shapes.
@@ -1676,15 +1964,9 @@ pub(super) fn get_remote_events_by_id(
             continue;
         }
         let pdus = fetch_events_individually(dag_request, std::slice::from_ref(id), &mut state);
-        let found = pdus.iter().any(|pdu| {
-            crate::repair::event_id_of(pdu)
-                .or_else(|| {
-                    rezzy::reference_hash(pdu, dag_request.room_version)
-                        .ok()
-                        .map(|hash| format!("${hash}"))
-                })
-                .is_some_and(|returned| returned == *id)
-        });
+        let found = pdus
+            .iter()
+            .any(|pdu| pdu_id(pdu, dag_request.room_version).is_some_and(|got| got == *id));
         // An unreachable server already put this ID in `unresolved`.
         if !found && state.unreachable.is_none() {
             state.unresolved.push(id.clone());
@@ -1890,6 +2172,8 @@ struct GapFillRequest<'a> {
 /// resumed runs do not ask again for events the server has already refused.
 const TRIED_FILE: &str = "tried.txt";
 const AUTH_TRIED_FILE: &str = "auth-tried.txt";
+/// Per-ID answers to single-event requests, one JSON object per line.
+const OUTCOMES_FILE: &str = "outcomes.jsonl";
 
 /// Debug-only log of every request in a round. It is not event data, so it must
 /// never be reloaded as events when resuming.
@@ -1987,15 +2271,75 @@ fn write_tried_file(path: &Path, tried: &HashSet<String>) -> Result<(), AppError
     write_frontier_checkpoint(path, &ids)
 }
 
+/// What the destination said, per ID, across a gap-fill run. Each answer is
+/// relative to that one server; the latest answer per ID wins.
+#[derive(Default)]
+struct GapOutcomes {
+    /// Single-event answers for missing `prev_events`.
+    prev: BTreeMap<String, IdOutcome>,
+    /// `event_auth` answers, keyed by the event whose auth chain was asked for
+    /// (not by the missing auth ID, which that request cannot name).
+    auth_queries: BTreeMap<String, IdOutcome>,
+}
+
+/// Summarizes a gap-fill run.
+///
+/// `missing_prev_outcomes` answers, for every prev still missing, what the
+/// destination said when the ID was requested by itself. `found` cannot occur
+/// there: a found event stops being missing. `not_found` is a definite answer
+/// from the named server only, never proof that no one holds the event;
+/// `refused`, `transient` and `unanswered` say nothing about the event.
+/// `queried_servers` names every server this run asked, so an answer is always
+/// read against the sources that were actually consulted.
 fn gap_fill_result(
     events: &[rezzy::JsonValue],
     fetched: &[PathBuf],
     completed_rounds: u32,
     failed_requests: usize,
     closed: bool,
+    outcomes: &GapOutcomes,
+    destination: &str,
 ) -> JsonValue {
     let final_report = crate::repair::scan_gaps(events);
+    let describe = |id: &String, answers: &BTreeMap<String, IdOutcome>| {
+        let mut entry = answers.get(id).map_or_else(
+            || rezzy::json!({"outcome": "unanswered"}),
+            IdOutcome::to_json,
+        );
+        let _ = entry.insert(String::from("id"), rezzy::json!(id.clone()));
+        let _ = entry.insert(String::from("server"), rezzy::json!(destination));
+        entry
+    };
+    let missing_prev_outcomes = final_report
+        .missing_prev
+        .iter()
+        .map(|id| describe(id, &outcomes.prev))
+        .collect::<Vec<_>>();
+    let auth_query_outcomes = final_report
+        .references
+        .iter()
+        .filter(|r| r.kind == crate::repair::ReferenceKind::AuthEvents)
+        .map(|r| &r.event_id)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .filter(|id| outcomes.auth_queries.contains_key(*id))
+        .map(|id| describe(id, &outcomes.auth_queries))
+        .collect::<Vec<_>>();
+    // Ids the destination answered `found` for and that are now in the event
+    // set. Listed explicitly so a consumer never infers "found" from an id
+    // simply being absent from `missing_prev_outcomes`. It is still the
+    // consumer's import that closes a gap, not this list.
+    let resolved = outcomes
+        .prev
+        .iter()
+        .filter(|(id, outcome)| outcome.kind == "found" && final_report.present.contains(*id))
+        .map(|(id, _)| rezzy::json!({"id": id.clone(), "server": destination, "outcome": "found"}))
+        .collect::<Vec<_>>();
     rezzy::json!({
+        "queried_servers": [destination],
+        "resolved": resolved,
+        "missing_prev_outcomes": missing_prev_outcomes,
+        "auth_query_outcomes": auth_query_outcomes,
         "status": if closed || final_report.is_closed() { "closed" } else { "incomplete" },
         "rounds": completed_rounds,
         "events": final_report.present.len(),
@@ -2017,6 +2361,7 @@ fn fetch_gap_round(
     round: u32,
     tried: &mut HashSet<String>,
     auth_tried: &mut HashSet<String>,
+    outcomes: &mut GapOutcomes,
 ) -> Result<(usize, usize, Vec<PathBuf>, usize), AppError> {
     let before = crate::repair::scan_gaps(events).present.len();
     let report = crate::repair::scan_gaps(events);
@@ -2053,6 +2398,7 @@ fn fetch_gap_round(
             emit_missing: None,
         };
         let tried_path = request.output_dir.join(TRIED_FILE);
+        let outcomes_path = request.output_dir.join(OUTCOMES_FILE);
         let result = get_remote_dag_with_known_and_checkpoint(
             &dag_request,
             Some(&known),
@@ -2062,6 +2408,8 @@ fn fetch_gap_round(
                 requests_path: requests_path.as_deref(),
                 round,
                 skip_tried: request.skip_tried,
+                outcomes: &mut outcomes.prev,
+                outcomes_path: Some(&outcomes_path),
             }),
         );
         let summary = match result {
@@ -2096,6 +2444,7 @@ fn fetch_gap_round(
         round,
         auth_tried,
         requests_path.as_deref(),
+        &mut outcomes.auth_queries,
     )?;
     if let Some(path) = auth_path {
         fetched.push(path);
@@ -2162,6 +2511,12 @@ fn gap_fill(request: &GapFillRequest<'_>) -> Result<JsonValue, AppError> {
     let mut completed_rounds = round;
     let mut failed_requests = 0_usize;
     let mut closed = false;
+    let mut outcomes = GapOutcomes::default();
+    if request.resume {
+        // Answers from earlier runs against this same server, so a resumed run
+        // does not report them as unanswered.
+        outcomes.prev = read_outcomes_file(&output_dir.join(OUTCOMES_FILE), request.destination)?;
+    }
     let mut ran = 0_u32;
     loop {
         if rounds != 0 && ran >= rounds {
@@ -2180,6 +2535,7 @@ fn gap_fill(request: &GapFillRequest<'_>) -> Result<JsonValue, AppError> {
             round,
             &mut tried,
             &mut auth_tried,
+            &mut outcomes,
         )?;
         write_tried(output_dir, &tried)?;
         ran = ran.saturating_add(1);
@@ -2197,6 +2553,8 @@ fn gap_fill(request: &GapFillRequest<'_>) -> Result<JsonValue, AppError> {
         completed_rounds,
         failed_requests,
         closed,
+        &outcomes,
+        request.destination,
     ))
 }
 
@@ -2251,6 +2609,8 @@ struct AuthFetchContext<'a> {
     requests_path: Option<&'a Path>,
     round: u32,
     skip_tried: bool,
+    /// Receives the `event_auth` answer for each citing event asked about.
+    outcomes: &'a mut BTreeMap<String, IdOutcome>,
 }
 
 /// Fetches auth chains for events citing missing auth references and writes
@@ -2272,6 +2632,7 @@ fn fetch_auth_batches(
         requests_path,
         round,
         skip_tried,
+        outcomes,
     } = context;
     let mut referencing = std::collections::BTreeSet::new();
     for reference in &report.references {
@@ -2302,6 +2663,7 @@ fn fetch_auth_batches(
             key_path,
         );
         let attempt = attempt_of(Some(&event_id), "event_auth", &result, started);
+        outcomes.insert(event_id.clone(), IdOutcome::of(&attempt));
         if let Some(path) = requests_path {
             append_auth_attempt(
                 path,
@@ -2361,6 +2723,7 @@ fn fetch_auth_for_round(
     round: u32,
     auth_tried: &mut HashSet<String>,
     requests_path: Option<&Path>,
+    auth_queries: &mut BTreeMap<String, IdOutcome>,
 ) -> Result<(Option<PathBuf>, usize), AppError> {
     let report = crate::repair::scan_gaps(events);
     if report.missing_auth.is_empty() {
@@ -2380,6 +2743,7 @@ fn fetch_auth_for_round(
             requests_path,
             round,
             skip_tried: request.skip_tried,
+            outcomes: auth_queries,
         },
     )?;
     if !failures.is_empty() {
@@ -2476,6 +2840,11 @@ fn write_frontier_checkpoint(path: &Path, frontier: &[String]) -> Result<(), App
         text.push_str(id);
         text.push('\n');
     }
+    write_frontier_checkpoint_text(path, &text)
+}
+
+/// Atomically replaces `path` with `text`.
+fn write_frontier_checkpoint_text(path: &Path, text: &str) -> Result<(), AppError> {
     if let Some(parent) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
@@ -2489,6 +2858,36 @@ fn write_frontier_checkpoint(path: &Path, frontier: &[String]) -> Result<(), App
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
+    #[test]
+    fn outcomes_persist_per_server_and_reload_only_that_servers_answers() {
+        use super::{read_outcomes_file, write_outcomes_file, IdOutcome};
+        use std::collections::BTreeMap;
+
+        let dir = std::env::temp_dir().join(format!("rezzy-outcomes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("outcomes.jsonl");
+        let _ = std::fs::remove_file(&path);
+        let answer = |kind: &'static str, status| IdOutcome {
+            kind,
+            status: Some(status),
+            errcode: None,
+        };
+        let a = BTreeMap::from([("$x".to_owned(), answer("not_found", 404))]);
+        let b = BTreeMap::from([("$x".to_owned(), answer("transient", 503))]);
+        write_outcomes_file(&path, "a.test", &a).unwrap();
+        write_outcomes_file(&path, "b.test", &b).unwrap();
+        // Rewriting one server must not drop the other's evidence.
+        write_outcomes_file(&path, "a.test", &a).unwrap();
+        assert_eq!(read_outcomes_file(&path, "a.test").unwrap(), a);
+        assert_eq!(read_outcomes_file(&path, "b.test").unwrap(), b);
+        assert!(read_outcomes_file(&path, "c.test").unwrap().is_empty());
+        std::fs::write(&path, "not json\n").unwrap();
+        assert!(read_outcomes_file(&path, "a.test").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::{
         domain_env_suffix, parse_signing_key, AppError, ErrorCode, FetchFailures, SigningKey,
         VerificationKey, PKCS8_ED25519_PREFIX,
@@ -2561,7 +2960,10 @@ mod tests {
         bytes.extend_from_slice(&<[u8; 32]>::from(VerificationKey::from(&SigningKey::from(
             seed,
         ))));
-        let digits: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        let mut digits = String::with_capacity(bytes.len().saturating_mul(2));
+        for byte in bytes {
+            write!(digits, "{byte:02x}").expect("writing to a String cannot fail");
+        }
         format!("0x{digits}")
     }
 
@@ -2592,7 +2994,7 @@ mod tests {
         wrong.replace_range(dump.len() - 2.., "00");
         assert!(parse_signing_key(&wrong).is_err());
         // The DER sequence declares 81 content bytes; reject a different length.
-        let mut wrong_length = dump.clone();
+        let mut wrong_length = dump;
         wrong_length.replace_range(2 + 9 * 2 + 2..2 + 9 * 2 + 4, "00");
         assert!(parse_signing_key(&wrong_length).is_err());
     }
@@ -2645,6 +3047,136 @@ mod tests {
         super::write_frontier_checkpoint(&path, &["$only".to_string()]).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "$only\n");
         assert!(!dir.join("frontier.jsonl.tmp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A throwaway seed as base64, for key lines. Never a real key.
+    fn throwaway_seed(byte: u8) -> String {
+        <base64::engine::GeneralPurpose as base64::Engine>::encode(
+            &base64::engine::general_purpose::STANDARD_NO_PAD,
+            [byte; 32],
+        )
+    }
+
+    #[test]
+    fn bundle_input_parses_one_active_and_retired_keys() {
+        let text = format!(
+            "# comment\ned25519:old {} created=10 retired=20\n\ned25519:new {} created=30\n",
+            throwaway_seed(1),
+            throwaway_seed(2),
+        );
+        let bundle = super::parse_key_bundle("minimat.example", &text).unwrap();
+        assert_eq!(bundle.origin(), "minimat.example");
+        assert_eq!(bundle.active().key_id(), "ed25519:new");
+        let old = &bundle.keys()[0];
+        assert_eq!((old.created_ms(), old.retired_ms()), (10, Some(20)));
+    }
+
+    #[test]
+    fn bundle_input_errors_name_the_line() {
+        let error = super::parse_key_bundle("o.example", "not a key\n").unwrap_err();
+        assert!(error.starts_with("line 1:"), "{error}");
+        let two_active = format!(
+            "ed25519:a {}\ned25519:b {}\n",
+            throwaway_seed(1),
+            throwaway_seed(2)
+        );
+        assert!(super::parse_key_bundle("o.example", &two_active)
+            .unwrap_err()
+            .contains("exactly one active"));
+        let bad = format!("ed25519:a {} retired=soon\n", throwaway_seed(1));
+        assert!(super::parse_key_bundle("o.example", &bad)
+            .unwrap_err()
+            .contains("bad retired="));
+    }
+
+    /// Weak Argon2 costs for fixtures whose KDF is not what the test is about.
+    const FAST_KDF: (u32, u32, u32) = (8, 1, 1);
+
+    fn write_fast(path: &std::path::Path, plaintext: &[u8]) {
+        let sealed =
+            rezzy_keyfile::container::seal_with(plaintext, b"throwaway", FAST_KDF).unwrap();
+        std::fs::write(path, sealed).unwrap();
+    }
+
+    /// The one test that runs `encrypt-key --bundle` at the production KDF
+    /// costs: one seal and one load. Everything else uses [`FAST_KDF`].
+    /// Ignored by default so the suite stays fast even without an optimized
+    /// dependency; run it with `cargo test -- --ignored`.
+    #[test]
+    #[ignore = "pays the production Argon2 cost; use --ignored"]
+    fn encrypt_key_bundle_round_trips_at_production_costs() {
+        let dir = std::env::temp_dir().join(format!("rezzy-bundle-e2e-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Origin-scoped, so no other test or the user's environment is read.
+        std::env::set_var("REZZY_KEY_PASSPHRASE_BUNDLE_E2E_EXAMPLE", "throwaway");
+        let input = dir.join("keys.txt");
+        std::fs::write(
+            &input,
+            format!(
+                "ed25519:old {} retired=20\ned25519:new {}\n",
+                throwaway_seed(1),
+                throwaway_seed(2)
+            ),
+        )
+        .unwrap();
+        let sealed = dir.join("bundle.enc");
+        super::encrypt_key_file_with_origin(&input, &sealed, Some("bundle-e2e.example"), true)
+            .unwrap();
+        let spec = super::load_signing_key("bundle-e2e.example", Some(&sealed)).unwrap();
+        assert_eq!(spec.key_id, "ed25519:new");
+        assert_eq!(
+            <[u8; 32]>::from(spec.key),
+            [2; 32],
+            "the active key's seed is the one signing"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Origin binding and legacy single-key files, on cheap key files: a
+    /// bundle loads for its own server name only, and an old single-key file
+    /// still loads.
+    #[test]
+    fn a_bundle_loads_for_its_origin_only_and_single_keys_still_work() {
+        let dir = std::env::temp_dir().join(format!("rezzy-bundle-load-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("REZZY_KEY_PASSPHRASE_BUNDLE_LOAD_EXAMPLE", "throwaway");
+
+        let bundle = rezzy_keyfile::KeyBundle::new(
+            "bundle-load.example",
+            vec![
+                rezzy_keyfile::KeyEntry::retired("ed25519:old", [1; 32], 0, 20),
+                rezzy_keyfile::KeyEntry::active("ed25519:new", [2; 32], 0),
+            ],
+        )
+        .unwrap();
+        let sealed = dir.join("bundle.enc");
+        write_fast(&sealed, &bundle.encode());
+        let spec = super::load_signing_key("bundle-load.example", Some(&sealed)).unwrap();
+        assert_eq!(spec.key_id, "ed25519:new");
+        // The scheme and path of an origin are not part of its server name.
+        assert!(super::load_signing_key("https://bundle-load.example/", Some(&sealed)).is_ok());
+        let other = super::load_signing_key("bundle-load.example:8448", Some(&sealed));
+        assert!(
+            other.unwrap_err().to_string().contains("is for"),
+            "a different server name must be refused"
+        );
+
+        // `--bundle` without an origin is refused rather than guessed.
+        let input = dir.join("keys.txt");
+        std::fs::write(&input, format!("ed25519:a {}\n", throwaway_seed(1))).unwrap();
+        assert!(super::encrypt_key_file_with_origin(&input, &sealed, None, true).is_err());
+
+        // A single-key file in the old text form keeps loading.
+        let single = dir.join("single.enc");
+        write_fast(
+            &single,
+            format!("ed25519:solo {}\n", throwaway_seed(3)).as_bytes(),
+        );
+        let spec = super::load_signing_key("bundle-load.example", Some(&single)).unwrap();
+        assert_eq!(spec.key_id, "ed25519:solo");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

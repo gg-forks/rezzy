@@ -2,11 +2,9 @@
 
 use super::hash::StructuralHash;
 use alloc::{string::String, vec::Vec};
-use core::hash::Hash;
 
 /// Magic prefix for a persisted HAMT node record.
 pub const HAMT_NODE_MAGIC: &[u8; 4] = b"MTHN";
-
 /// Magic prefix for a persisted state-group root record.
 pub const HAMT_ROOT_MAGIC: &[u8; 4] = b"MTHR";
 
@@ -20,6 +18,12 @@ pub const HAMT_WIRE_VERSION: u8 = 0x01;
 ///
 /// This stays explicit and versioned instead of delegating persistence
 /// semantics to a generic serializer.
+///
+/// The encoding must be deterministic and stable: a key's encoding is also its
+/// routing input ([`HamtRoutingKey`]), and every encoded leaf is part of its
+/// node's structural hash. Equal values must always encode to equal bytes, and
+/// changing an encoding changes the shape and identity of every persisted tree
+/// that uses it.
 pub trait HamtCodec: Sized {
     /// Encodes the value into the provided buffer.
     fn encode_hamt(&self, out: &mut Vec<u8>);
@@ -55,6 +59,28 @@ fn read_len_prefixed<'a>(input: &'a [u8], cursor: &mut usize) -> Result<&'a [u8]
     Ok(bytes)
 }
 
+/// Validates the canonical ordering of a terminal collision bucket.
+///
+/// Collision leaves must be encoded in strictly ascending key-byte order so
+/// the persisted bytes (and therefore the structural hash) cannot depend on
+/// insertion order. Both the decoder and the direct verified-conversion path
+/// use this, so a caller cannot bypass the check by constructing
+/// [`PersistedInternalNode`] fields by hand.
+pub(super) fn check_collision_key_order<K: HamtCodec, V>(
+    leaves: &[(K, V)],
+) -> Result<(), &'static str> {
+    let mut previous: Option<Vec<u8>> = None;
+    for (key, _) in leaves {
+        let mut encoded = Vec::new();
+        key.encode_hamt(&mut encoded);
+        if previous.as_ref().is_some_and(|old| old >= &encoded) {
+            return Err("MTHC keys are not in canonical order");
+        }
+        previous = Some(encoded);
+    }
+    Ok(())
+}
+
 fn decode_node_header(
     buf: &[u8],
     datamap_start: usize,
@@ -77,11 +103,19 @@ fn decode_node_header(
     ) as usize;
     let expected_leaves = datamap.count_ones() as usize;
     let expected_children = nodemap.count_ones() as usize;
-    if leaf_count != expected_leaves {
+    let collision_bucket = datamap == 0 && nodemap == 0 && leaf_count >= 2 && child_count == 0;
+    if leaf_count != expected_leaves && !collision_bucket {
         return Err("Leaf count does not match datamap");
     }
     if child_count != expected_children {
         return Err("Child count does not match nodemap");
+    }
+    // A collision bucket with `n` distinct keys must consume at least `n - 1`
+    // bytes of key payload (at most one key can encode to zero bytes). Reject
+    // a hostile count before `decode_leaves` can spin on `u32::MAX`.
+    let payload_len = buf.len().saturating_sub(cursor);
+    if collision_bucket && leaf_count.saturating_sub(1) > payload_len {
+        return Err("Leaf count exceeds remaining payload");
     }
     Ok((datamap, nodemap, leaf_count, child_count))
 }
@@ -95,7 +129,10 @@ where
     K: HamtCodec,
     V: HamtCodec,
 {
-    let mut leaves = Vec::with_capacity(leaf_count);
+    // Collision buckets may contain more than the 32 ordinary datamap slots.
+    // Do not trust their persisted count as an allocation size before reading
+    // the payload; truncated hostile records should fail without huge allocs.
+    let mut leaves = Vec::with_capacity(leaf_count.min(32));
     for _ in 0..leaf_count {
         let key = K::decode_hamt(buf, cursor)?;
         let value = V::decode_hamt(buf, cursor)?;
@@ -201,28 +238,110 @@ impl HamtCodec for bool {
     }
 }
 
-impl HamtCodec for String {
+/// The bytes a key routes by.
+///
+/// Every [`HamtCodec`] type routes by its own encoding, so a tree's shape
+/// depends only on the persisted bytes of its keys, never on a Rust `Hash`
+/// implementation. A borrowed form used for lookups (`str` for `String`) must
+/// produce exactly the bytes of its owned form: the same contract `Borrow`
+/// places on `Hash`. Key encodings must also be injective: distinct keys must
+/// not serialize to identical bytes.
+pub trait HamtRoutingKey {
+    /// Appends the routing bytes of `self` to `out`.
+    fn encode_routing(&self, out: &mut Vec<u8>);
+}
+
+impl<T: HamtCodec> HamtRoutingKey for T {
+    #[inline]
+    fn encode_routing(&self, out: &mut Vec<u8>) {
+        self.encode_hamt(out);
+    }
+}
+
+/// A `u32` length, then the UTF-8 bytes. Every [`HamtStrCodec`] type encodes
+/// through this, so owned and borrowed forms always route alike.
+impl HamtRoutingKey for str {
+    fn encode_routing(&self, out: &mut Vec<u8>) {
+        write_len_prefixed(self.as_bytes(), out, "string too long for HAMT codec");
+    }
+}
+
+/// Appends a `u32` little-endian length, then `bytes`.
+fn write_len_prefixed(bytes: &[u8], out: &mut Vec<u8>, too_long: &str) {
+    let len = u32::try_from(bytes.len()).expect(too_long);
+    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(bytes);
+}
+
+/// A key or value stored as a length-prefixed UTF-8 string.
+///
+/// Every implementor encodes through `str`, so it is byte-identical to the same
+/// text as a `String` and a `&str` lookup routes exactly like it.
+pub trait HamtStrCodec: Sized {
+    /// The text this value encodes as.
+    fn as_codec_str(&self) -> &str;
+
+    /// Rebuilds the value from decoded text.
+    ///
+    /// # Errors
+    /// Returns an error if the text is not a valid value of this type.
+    fn from_codec_string(text: String) -> Result<Self, &'static str>;
+}
+
+impl<T: HamtStrCodec> HamtCodec for T {
     fn encode_hamt(&self, out: &mut Vec<u8>) {
-        let len = u32::try_from(self.len()).expect("string too long for HAMT codec");
-        out.extend_from_slice(&len.to_le_bytes());
-        out.extend_from_slice(self.as_bytes());
+        self.as_codec_str().encode_routing(out);
     }
 
     fn decode_hamt(input: &[u8], cursor: &mut usize) -> Result<Self, &'static str> {
-        String::from_utf8(read_len_prefixed(input, cursor)?.to_vec())
-            .map_err(|_| "HAMT codec invalid UTF-8")
+        let text = String::from_utf8(read_len_prefixed(input, cursor)?.to_vec())
+            .map_err(|_| "HAMT codec invalid UTF-8")?;
+        Self::from_codec_string(text)
+    }
+}
+
+impl HamtStrCodec for String {
+    fn as_codec_str(&self) -> &str {
+        self
+    }
+
+    fn from_codec_string(text: String) -> Result<Self, &'static str> {
+        Ok(text)
+    }
+}
+
+impl HamtStrCodec for crate::basespec::event_types::EventType {
+    fn as_codec_str(&self) -> &str {
+        self.as_str()
+    }
+
+    fn from_codec_string(text: String) -> Result<Self, &'static str> {
+        Ok(Self::from(text))
     }
 }
 
 impl HamtCodec for Vec<u8> {
     fn encode_hamt(&self, out: &mut Vec<u8>) {
-        let len = u32::try_from(self.len()).expect("byte vector too long for HAMT codec");
-        out.extend_from_slice(&len.to_le_bytes());
-        out.extend_from_slice(self);
+        write_len_prefixed(self, out, "byte vector too long for HAMT codec");
     }
 
     fn decode_hamt(input: &[u8], cursor: &mut usize) -> Result<Self, &'static str> {
         Ok(read_len_prefixed(input, cursor)?.to_vec())
+    }
+}
+
+/// Fixed-width byte arrays are stored raw: `N` is part of the type, so no
+/// length prefix is needed. This is the value codec for raw 32-byte event
+/// reference hashes.
+impl<const N: usize> HamtCodec for [u8; N] {
+    #[inline]
+    fn encode_hamt(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(self);
+    }
+
+    #[inline]
+    fn decode_hamt(input: &[u8], cursor: &mut usize) -> Result<Self, &'static str> {
+        read_fixed::<N>(input, cursor)
     }
 }
 
@@ -236,20 +355,6 @@ impl<A: HamtCodec, B: HamtCodec> HamtCodec for (A, B) {
         let a = A::decode_hamt(input, cursor)?;
         let b = B::decode_hamt(input, cursor)?;
         Ok((a, b))
-    }
-}
-
-impl HamtCodec for crate::basespec::event_types::EventType {
-    fn encode_hamt(&self, out: &mut Vec<u8>) {
-        let bytes = self.as_str().as_bytes();
-        let len = u32::try_from(bytes.len()).expect("string too long for HAMT codec");
-        out.extend_from_slice(&len.to_le_bytes());
-        out.extend_from_slice(bytes);
-    }
-
-    fn decode_hamt(input: &[u8], cursor: &mut usize) -> Result<Self, &'static str> {
-        let s = String::decode_hamt(input, cursor)?;
-        Ok(crate::basespec::event_types::EventType::from(s))
     }
 }
 
@@ -273,18 +378,23 @@ where
     /// Encodes the canonical v1 representation shared by persistence and
     /// structural hashing. Keeping this in one place ensures a node's
     /// storage key commits to precisely the bytes stored under that key.
+    #[allow(clippy::arithmetic_side_effects)] // fixed-size header plus a bounded hash payload
     pub(crate) fn encode_v1_parts(
         datamap: u32,
         nodemap: u32,
         leaves: &[(K, V)],
         child_hashes: &[StructuralHash],
     ) -> Vec<u8> {
+        // This shape is necessarily MTHC territory: in v1, both maps clear
+        // normally means an empty node, so multiple leaves with no children
+        // identify a terminal collision bucket without changing the wire.
         let leaf_slots = datamap.count_ones() as usize;
         let child_slots = nodemap.count_ones() as usize;
-        assert_eq!(
-            leaves.len(),
-            leaf_slots,
-            "leaf count must match datamap bits"
+        let collision_bucket =
+            datamap == 0 && nodemap == 0 && leaves.len() > 1 && child_hashes.is_empty();
+        assert!(
+            leaves.len() == leaf_slots || collision_bucket,
+            "leaf count must match datamap bits unless this is an MTHC bucket"
         );
         assert_eq!(
             child_hashes.len(),
@@ -292,36 +402,38 @@ where
             "child count must match nodemap bits"
         );
         assert_eq!(datamap & nodemap, 0, "datamap and nodemap must not overlap");
-
-        let mut body = Vec::new();
-        for (key, value) in leaves {
-            key.encode_hamt(&mut body);
-            value.encode_hamt(&mut body);
-        }
-        for hash in child_hashes {
-            body.extend_from_slice(hash);
+        if collision_bucket {
+            assert!(
+                leaves.windows(2).all(|pair| {
+                    let mut left = Vec::new();
+                    let mut right = Vec::new();
+                    pair[0].0.encode_hamt(&mut left);
+                    pair[1].0.encode_hamt(&mut right);
+                    left < right
+                }),
+                "collision leaves must be strictly ascending by encoded key bytes"
+            );
         }
 
         let leaf_count = u32::try_from(leaves.len()).expect("too many leaves for v1 encoding");
         let child_count =
             u32::try_from(child_hashes.len()).expect("too many child hashes for v1 encoding");
-        let capacity = 1_usize
-            .checked_add(4)
-            .and_then(|value| value.checked_add(4))
-            .and_then(|value| value.checked_add(4))
-            .and_then(|value| value.checked_add(4))
-            .and_then(|value| value.checked_add(4))
-            .and_then(|value| value.checked_add(body.len()))
-            .expect("encoded node size overflows usize");
-
-        let mut buf = Vec::with_capacity(capacity);
+        // Encode straight into the final buffer; the old body-then-copy path
+        // allocated two vectors every time a node was hashed or persisted.
+        let mut buf = Vec::with_capacity(21 + child_hashes.len() * 32);
         buf.extend_from_slice(HAMT_NODE_MAGIC);
         buf.push(HAMT_WIRE_VERSION);
         buf.extend_from_slice(&datamap.to_le_bytes());
         buf.extend_from_slice(&nodemap.to_le_bytes());
         buf.extend_from_slice(&leaf_count.to_le_bytes());
         buf.extend_from_slice(&child_count.to_le_bytes());
-        buf.extend_from_slice(&body);
+        for (key, value) in leaves {
+            key.encode_hamt(&mut buf);
+            value.encode_hamt(&mut buf);
+        }
+        for hash in child_hashes {
+            buf.extend_from_slice(hash);
+        }
         buf
     }
 
@@ -364,7 +476,10 @@ where
         let (datamap, nodemap, leaf_count, child_count) = decode_node_header(buf, 5)?;
 
         let mut cursor = 21_usize;
-        let leaves = decode_leaves(buf, &mut cursor, leaf_count)?;
+        let leaves = decode_leaves::<K, V>(buf, &mut cursor, leaf_count)?;
+        if datamap == 0 && nodemap == 0 && leaf_count > 1 {
+            check_collision_key_order(&leaves)?;
+        }
 
         check_child_payload(
             buf,
@@ -397,58 +512,6 @@ where
         })
     }
 
-    /// Explicit, parse-only decoder for pre-record-kind records that carried
-    /// 16-byte structural hashes.
-    ///
-    /// This method is never used by the current decoder and must only be
-    /// called by a caller that has independently identified the input as a
-    /// legacy record. It exists solely so legacy bytes can be inspected or
-    /// migrated: the
-    /// current layout cannot recover the storage key those records were
-    /// written under (the key committed to the 16-byte representation), so a
-    /// legacy node can never satisfy [`Self::into_hamt_node_verified`].
-    /// Decoded child hashes hold their legacy 16 bytes left-aligned in the
-    /// 32-byte [`StructuralHash`] array; the trailing half is zero.
-    ///
-    /// # Errors
-    /// Returns an error when the buffer lacks the legacy marker or does not
-    /// match the legacy layout.
-    pub fn decode_v1_legacy_unverified(buf: &[u8]) -> Result<Self, &'static str> {
-        const LEGACY_HASH_WIDTH: usize = 16;
-
-        if !matches!(buf.first().copied(), Some(HAMT_WIRE_VERSION)) {
-            return Err("Invalid version byte");
-        }
-        if buf.len() < 17 {
-            return Err("Buffer too short for v1 header");
-        }
-
-        let (datamap, nodemap, leaf_count, child_count) = decode_node_header(buf, 1)?;
-
-        let mut cursor = 17_usize;
-        let leaves = decode_leaves(buf, &mut cursor, leaf_count)?;
-
-        check_child_payload(buf, cursor, child_count, LEGACY_HASH_WIDTH)?;
-
-        let mut child_hashes = Vec::with_capacity(child_count);
-        for _ in 0..child_count {
-            let end = cursor
-                .checked_add(LEGACY_HASH_WIDTH)
-                .ok_or("Child hash index overflows usize")?;
-            let mut hash = [0u8; core::mem::size_of::<StructuralHash>()];
-            hash[..LEGACY_HASH_WIDTH].copy_from_slice(&buf[cursor..end]);
-            child_hashes.push(hash);
-            cursor = end;
-        }
-
-        Ok(Self {
-            datamap,
-            nodemap,
-            leaves,
-            child_hashes,
-        })
-    }
-
     /// Validates this decoded node against the storage key that selected it.
     ///
     /// Persisted v1 nodes deliberately do not carry a duplicate structural
@@ -463,15 +526,15 @@ where
         self,
         structural_key: &[u8],
         expected_hash: StructuralHash,
-    ) -> Result<crate::hamt::HamtNode<K, V>, &'static str>
-    where
-        K: Hash,
-        V: Hash,
-    {
+    ) -> Result<crate::hamt::HamtNode<K, V>, &'static str> {
         if (self.datamap & self.nodemap) != 0 {
             return Err("PersistedInternalNode datamap and nodemap overlap");
         }
-        if self.leaves.len() != self.datamap.count_ones() as usize {
+        let collision = self.datamap == 0 && self.nodemap == 0 && self.leaves.len() > 1;
+        if collision {
+            check_collision_key_order(&self.leaves)?;
+        }
+        if !collision && self.leaves.len() != self.datamap.count_ones() as usize {
             return Err("PersistedInternalNode leaf count does not match datamap");
         }
         if self.child_hashes.len() != self.nodemap.count_ones() as usize {
@@ -518,11 +581,7 @@ where
         buf: &[u8],
         structural_key: &[u8],
         expected_hash: StructuralHash,
-    ) -> Result<crate::hamt::HamtNode<K, V>, &'static str>
-    where
-        K: Hash,
-        V: Hash,
-    {
+    ) -> Result<crate::hamt::HamtNode<K, V>, &'static str> {
         Self::decode_v1_unverified(buf)?.into_hamt_node_verified(structural_key, expected_hash)
     }
 }

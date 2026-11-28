@@ -14,14 +14,14 @@
 //! further safety checks, never as a delete list on its own.
 
 use crate::dense_index::{DenseIndex, IndexTooLarge};
-use crate::HashSet;
+use crate::{HashMap, HashSet};
 use alloc::{sync::Arc, vec::Vec};
 use core::fmt;
 
 use crate::bitmap::Bitmap;
 
 use super::{
-    delta::{walk_reachable_node_hashes, HamtTraversalError},
+    delta::{walk_reachable_node_hashes_with_placements, HamtTraversalError},
     HamtNode, StructuralHash,
 };
 
@@ -199,7 +199,7 @@ impl<E> From<HamtTraversalError<E>> for BitmapAuditError<E> {
 /// accumulating a `HashSet<StructuralHash>` mark set first — this is the
 /// version worth using when the caller actually wants the bitmap
 /// representation, not `node_reachability_audit`'s result reshaped afterward.
-/// Hashes the walk reaches that are outside `universe` are marked but never
+/// Hashes the walk reaches that are outside `universe` are not marked and never
 /// materialize a bitmap entry, matching `node_reachability_audit`'s handling of
 /// the same case.
 ///
@@ -237,20 +237,24 @@ where
     let universe = IndexedUniverse::try_build(universe)?;
 
     let mut reachable = Bitmap::new();
-    // Hashes outside `universe` still need dedup so a subtree shared across
-    // roots (or reachable from inside and outside `universe`) is walked
-    // once, same as `node_reachability_audit`. `reachable`'s own membership
-    // check covers dedup for anything actually in `universe`, so this set
-    // only ever grows for hashes the caller's `universe` scan missed.
-    let mut visited_outside_universe: HashSet<StructuralHash> = HashSet::default();
+    // The placement-aware walker dedups with `checked_placements`, so hashes
+    // outside `universe` need no bookkeeping here: return false to leave them
+    // out of the bitmap and ignore the (already unused) mark result.
+    let mut checked_placements: HashMap<StructuralHash, u64> = HashMap::default();
     for root in roots {
-        walk_reachable_node_hashes(&root, resolver, &mut |hash| {
-            if let Some(idx) = universe.index_of(&hash) {
-                reachable.insert(idx)
-            } else {
-                visited_outside_universe.insert(hash)
-            }
-        })
+        walk_reachable_node_hashes_with_placements(
+            &root,
+            resolver,
+            &mut |hash| {
+                if let Some(idx) = universe.index_of(&hash) {
+                    reachable.insert(idx);
+                    true
+                } else {
+                    false
+                }
+            },
+            &mut checked_placements,
+        )
         .map_err(BitmapAuditError::Traversal)?;
     }
 
@@ -287,11 +291,11 @@ pub struct NodeReachabilityAudit {
 /// Partitions `universe` into hashes reachable from `roots` and hashes that
 /// are not.
 ///
-/// Walks each root with [`walk_reachable_node_hashes`] against one shared
-/// `HashSet`, so subtrees shared between roots are resolved and walked only
-/// once in total. `resolver` is called once per distinct node hash
-/// encountered across all roots combined (not once per root), same as the
-/// underlying walk.
+/// Walks every root through the placement-aware audit walker against one
+/// shared mark set and depth map, so subtrees shared between roots are walked
+/// once per distinct `(node hash, depth)` placement. A repeated hash at a
+/// different depth is resolved again so its placement can be validated.
+/// `resolver` is therefore called at most once per placement across the audit.
 ///
 /// `reachable` is the full mark set intersected with `universe`; nodes the
 /// walk reaches that are outside `universe` (e.g. a caller's scan missed
@@ -303,7 +307,7 @@ pub struct NodeReachabilityAudit {
 /// deepest depth a legitimately-built HAMT can have.
 ///
 /// On error, the in-progress mark set may be partially populated (see
-/// [`walk_reachable_node_hashes`]'s error-recovery note); this function
+/// [`walk_reachable_node_hashes`](crate::hamt::walk_reachable_node_hashes)'s error-recovery note); this function
 /// discards it and returns the error rather than a partial answer, so a
 /// caller never mistakes a partial reachable set for a complete one.
 pub fn node_reachability_audit<K, V, F, E>(
@@ -315,8 +319,14 @@ where
     F: FnMut(&StructuralHash) -> Result<Arc<HamtNode<K, V>>, E>,
 {
     let mut marked: HashSet<StructuralHash> = HashSet::default();
+    let mut checked_placements: HashMap<StructuralHash, u64> = HashMap::default();
     for root in roots {
-        walk_reachable_node_hashes(&root, resolver, &mut |hash| marked.insert(hash))?;
+        walk_reachable_node_hashes_with_placements(
+            &root,
+            resolver,
+            &mut |hash| marked.insert(hash),
+            &mut checked_placements,
+        )?;
     }
 
     let mut reachable: HashSet<StructuralHash> = HashSet::default();

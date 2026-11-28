@@ -112,8 +112,9 @@ impl<T: Clone + Eq + core::hash::Hash + Ord + AsRef<str>> StateKey for T {}
 /// | Fragment | Room Versions | Delta from previous |
 /// |----------|:---:|---|
 /// | `v1-redactions.txt` | 1–5 | Baseline. PL: `ban`, `events`, `events_default`, `kick`, `redact`, `state_default`, `users`, `users_default`. Member: `membership`. |
-/// | `v6-redactions.txt` | 6–8 | Removes `m.room.aliases`. |
-/// | `v9-redactions.txt` | 9–10 | Member: adds `join_authorised_via_users_server`. Join rules: adds `allow`. |
+/// | `v6-redactions.txt` | 6–7 | Removes `m.room.aliases`. |
+/// | `v8-redactions.txt` | 8 | Join rules: adds `allow`. |
+/// | `v9-redactions.txt` | 9–10 | Member: adds `join_authorised_via_users_server`. |
 /// | `v11-redactions.txt` | 11+ | PL: adds `invite`. Create: allows ALL keys. Member: adds `third_party_invite.signed`. Drops top-level `prev_state`, `origin`, `membership`. Adds `m.room.redaction` preserving `redacts`. |
 ///
 /// **Key invariant:** `users` in `m.room.power_levels` is preserved on redaction
@@ -186,7 +187,7 @@ impl StateResVersion {
             RoomVersionFormat::Numeric(1) => Self::V1,
             RoomVersionFormat::Numeric(2..=11) | RoomVersionFormat::Msc3389 => Self::V2,
             RoomVersionFormat::Numeric(12) if ver == "12.1" => Self::V2_1_1,
-            RoomVersionFormat::Numeric(12) => Self::V2_1,
+            RoomVersionFormat::Numeric(12) | RoomVersionFormat::Cygnus => Self::V2_1,
             RoomVersionFormat::Msc4242 => Self::V2_2,
             RoomVersionFormat::NutraCdo => Self::V3,
             // Numeric(12) is the only other numeric variant; covered above.
@@ -317,6 +318,13 @@ enum RoomVersionFormat {
     Msc3389,
     /// Rezzy's experimental certified-causal-governance room version.
     NutraCdo,
+    /// MSC00FC "Cygnus" (`"tk.nutra.cygnus.12"`): room v12 plus
+    /// self-certifying link-chain identities. Base auth and state resolution
+    /// are exactly v12 (`V2_1`); the Cygnus rules are an overlay supplied by
+    /// the caller. Rezzy's redaction table knows only the v12 keys, so Cygnus
+    /// events must be hashed and redacted by the Cygnus verifier, which also
+    /// preserves epoch content and `device_certificate`.
+    Cygnus,
 }
 
 impl RoomVersionFormat {
@@ -336,12 +344,17 @@ impl RoomVersionFormat {
             "7" => Some(Self::Numeric(7)),
             "8" => Some(Self::Numeric(8)),
             "9" => Some(Self::Numeric(9)),
-            "10" => Some(Self::Numeric(10)),
+            // MSC4014 (pseudonymous IDs) changes the identity fields
+            // (`sender`, `state_key`) but not the hashing, redaction,
+            // canonical JSON or state resolution rules, which are room v10's.
+            // Aliased on purpose: revisit if the MSC adds its own rules.
+            "10" | "org.matrix.msc4014" => Some(Self::Numeric(10)),
             "11" => Some(Self::Numeric(11)),
             "12" | "12.1" => Some(Self::Numeric(12)),
             "org.matrix.msc4242.12" => Some(Self::Msc4242),
             "org.matrix.msc3389.10" => Some(Self::Msc3389),
             "tk.nutra.cdo.12" => Some(Self::NutraCdo),
+            "tk.nutra.cygnus.12" => Some(Self::Cygnus),
             _ => None,
         }
     }
@@ -355,7 +368,10 @@ impl RoomVersionFormat {
     #[must_use]
     const fn requires_strict_canonical_numbers(self) -> bool {
         matches!(self, Self::Numeric(v) if v >= 6)
-            || matches!(self, Self::Msc4242 | Self::Msc3389 | Self::NutraCdo)
+            || matches!(
+                self,
+                Self::Msc4242 | Self::Msc3389 | Self::NutraCdo | Self::Cygnus
+            )
     }
 
     /// Returns `true` for room versions that use v11 redaction rules (v11+),
@@ -364,7 +380,14 @@ impl RoomVersionFormat {
     #[must_use]
     const fn uses_v11_redaction_rules(self) -> bool {
         matches!(self, Self::Numeric(v) if v >= 11)
-            || matches!(self, Self::Msc4242 | Self::NutraCdo)
+            || matches!(self, Self::Msc4242 | Self::NutraCdo | Self::Cygnus)
+    }
+
+    /// Returns `true` for room versions that identify users by opaque
+    /// principal identifiers rather than MXIDs.
+    #[must_use]
+    const fn uses_principal_identifiers(self) -> bool {
+        matches!(self, Self::Cygnus)
     }
 
     /// Returns `true` for room versions that use v12 create-event rules (v12+,
@@ -373,7 +396,7 @@ impl RoomVersionFormat {
     #[must_use]
     const fn uses_v12_create_rules(self) -> bool {
         matches!(self, Self::Numeric(v) if v >= 12)
-            || matches!(self, Self::Msc4242 | Self::NutraCdo)
+            || matches!(self, Self::Msc4242 | Self::NutraCdo | Self::Cygnus)
     }
 
     /// Returns `true` when event IDs are reference hashes computed by the
@@ -382,6 +405,54 @@ impl RoomVersionFormat {
     const fn uses_reference_hash_event_ids(self) -> bool {
         !matches!(self, Self::Numeric(1 | 2))
     }
+}
+
+/// Returns `true` for MSC00FC auth-event types that participate in the
+/// Cygnus overlay but are not part of the base v12 auth-event whitelist.
+#[must_use]
+pub fn is_cygnus_auth_event_type(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "m.room.user_epoch" | "m.room.server_epoch" | "m.room.server_seal" | "m.room.server_acl"
+    )
+}
+
+/// Returns `true` for room versions that identify users by opaque principal
+/// identifiers rather than MXIDs. MSC00FC "Cygnus" replaces user IDs with
+/// `@<base64url>` principals, so MXID syntax checks do not apply.
+#[must_use]
+pub fn uses_principal_identifiers(room_version: &str) -> bool {
+    RoomVersionFormat::parse(room_version)
+        .is_some_and(RoomVersionFormat::uses_principal_identifiers)
+}
+
+/// Returns `true` if `id` is an opaque principal identifier: `@` followed by a
+/// non-empty base64url string (`A-Z`, `a-z`, `0-9`, `-`, `_`). Principals carry
+/// no `:` domain part, so they are not MXIDs.
+#[must_use]
+pub fn is_valid_principal_identifier(id: &str) -> bool {
+    id.strip_prefix('@').is_some_and(|body| {
+        !body.is_empty()
+            && body
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    })
+}
+
+/// Returns `true` for room versions that redact with the v11 rules (v11 and
+/// later, including v12 and the v12-derived experimental formats). Returns
+/// `false` for older and unrecognised versions.
+#[must_use]
+pub fn uses_v11_redaction_rules(room_version: &str) -> bool {
+    RoomVersionFormat::parse(room_version).is_some_and(RoomVersionFormat::uses_v11_redaction_rules)
+}
+
+/// Returns `true` for room versions that apply the v12 create-event rules (v12
+/// and the v12-derived experimental formats). Returns `false` for older and
+/// unrecognised versions.
+#[must_use]
+pub fn uses_v12_create_rules(room_version: &str) -> bool {
+    RoomVersionFormat::parse(room_version).is_some_and(RoomVersionFormat::uses_v12_create_rules)
 }
 
 /// Error type for canonical JSON number validation failures.
@@ -420,6 +491,23 @@ impl From<core::fmt::Error> for CanonicalizationError {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod room_version_format_tests {
+    #[test]
+    fn public_capability_wrappers_follow_the_version_boundaries() {
+        use super::{uses_v11_redaction_rules, uses_v12_create_rules};
+        for v in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"] {
+            assert!(!uses_v11_redaction_rules(v), "{v}");
+            assert!(!uses_v12_create_rules(v), "{v}");
+        }
+        assert!(uses_v11_redaction_rules("11"));
+        assert!(!uses_v12_create_rules("11"));
+        for v in ["12", "12.1", "tk.nutra.cygnus.12"] {
+            assert!(uses_v11_redaction_rules(v), "{v}");
+            assert!(uses_v12_create_rules(v), "{v}");
+        }
+        assert!(!uses_v11_redaction_rules("not-a-version"));
+        assert!(!uses_v12_create_rules(""));
+    }
+
     use super::RoomVersionFormat;
 
     #[test]
@@ -440,6 +528,8 @@ mod room_version_format_tests {
             ("12.1", RoomVersionFormat::Numeric(12)),
             ("org.matrix.msc4242.12", RoomVersionFormat::Msc4242),
             ("org.matrix.msc3389.10", RoomVersionFormat::Msc3389),
+            ("org.matrix.msc4014", RoomVersionFormat::Numeric(10)),
+            ("tk.nutra.cygnus.12", RoomVersionFormat::Cygnus),
         ];
         for (input, expected) in cases {
             assert_eq!(
@@ -448,6 +538,23 @@ mod room_version_format_tests {
                 "parse({input:?}) should be Some({expected:?})"
             );
         }
+    }
+
+    #[test]
+    fn cygnus_room_version_resolves_with_v2_1() {
+        assert_eq!(
+            super::StateResVersion::from_room_version("tk.nutra.cygnus.12"),
+            Some(super::StateResVersion::V2_1)
+        );
+        assert_eq!(
+            super::StateResVersion::from_room_version("tk.nutra.cygnus.2"),
+            None
+        );
+        // The pre-rename identifier is not an alias.
+        assert_eq!(
+            super::StateResVersion::from_room_version("tk.nutra.cygnus.1"),
+            None
+        );
     }
 
     #[test]
@@ -581,7 +688,7 @@ pub fn redaction_preserved_keys(event_type: &str, room_version: &str) -> Redacti
         // Handled by the early return above; v10 is the nearest numeric rule set.
         RoomVersionFormat::Msc3389 => 10,
         // MSC4242 inherits v11's redaction rules verbatim.
-        RoomVersionFormat::Msc4242 | RoomVersionFormat::NutraCdo => 11,
+        RoomVersionFormat::Msc4242 | RoomVersionFormat::NutraCdo | RoomVersionFormat::Cygnus => 11,
     };
     match event_type {
         crate::basespec::event_types::M_ROOM_CREATE => {
@@ -631,7 +738,7 @@ pub fn redaction_preserved_keys(event_type: &str, room_version: &str) -> Redacti
             }
         }
         crate::basespec::event_types::M_ROOM_JOIN_RULES => {
-            if ver_num >= 9 {
+            if ver_num >= 8 {
                 RedactionRule::Keys(&["join_rule", "allow"])
             } else {
                 RedactionRule::Keys(&["join_rule"])
@@ -862,7 +969,7 @@ fn redact_top_level(value: &Value, room_version: &str) -> crate::json::Object {
 /// are unpadded. Mirrors Synapse's Rust (`ROOM_V3 -> STANDARD`, else
 /// `URL_SAFE`) and its `unpaddedbase64.encode_base64` (default STANDARD).
 #[must_use]
-fn hash_base64_engine(room_version: &str) -> base64::engine::GeneralPurpose {
+pub(crate) fn hash_base64_engine(room_version: &str) -> base64::engine::GeneralPurpose {
     use base64::engine::{general_purpose::NO_PAD, GeneralPurpose};
     let is_v3 = room_version
         .split('.')
@@ -967,6 +1074,14 @@ fn reference_hash_digest(
     if has_opaque_event_ids(room_version) {
         return Err(alloc::format!(
             "no reference hash for room version {room_version}: v1/v2 event IDs are opaque server-assigned strings, not hashes"
+        ));
+    }
+
+    // The Cygnus verifier owns the redaction whitelist for reference hashes;
+    // applying the base v11 table here would omit Cygnus epoch fields.
+    if RoomVersionFormat::parse(room_version) == Some(RoomVersionFormat::Cygnus) {
+        return Err(alloc::format!(
+            "no base reference hash for room version {room_version}: Cygnus events must be hashed by the Cygnus verifier, which preserves epoch content and device_certificate"
         ));
     }
 
@@ -1173,15 +1288,11 @@ fn validate_canonical_number(n: &crate::json::Number) -> Result<(), Canonicaliza
     if s.contains('.') || s.contains('e') || s.contains('E') {
         return Err(CanonicalizationError::FractionalOrExponentNumber);
     }
-    // Range check: must fit within ±(2^53 − 1).
-    if let Some(v) = n.as_i64() {
-        if v.unsigned_abs() > (1_u64 << 53) - 1 {
-            return Err(CanonicalizationError::OutOfRangeNumber);
-        }
-    } else if let Some(v) = n.as_u64() {
-        if v > (1_u64 << 53) - 1 {
-            return Err(CanonicalizationError::OutOfRangeNumber);
-        }
+    // Everything else must be a canonical integer within ±(2^53 − 1). This
+    // also rejects integers wider than 64 bits, which `as_i64`/`as_u64` can't
+    // represent, and non-canonical spellings such as `-0`.
+    if !n.is_canonical_integer() {
+        return Err(CanonicalizationError::OutOfRangeNumber);
     }
     Ok(())
 }
@@ -1572,7 +1683,7 @@ pub trait DagNode {
     }
 
     /// State-predecessor edges at the given room version.
-    ///
+    /// Validates the event ID, sender identity, and create-event identifiers.
     /// For V2.2 (MSC4242): identical to `prev_state_events()`.
     /// For V1–V2.1.1: falls back to `prev_events()`, matching the
     /// MSC4500 `state_predecessors` definition where the general DAG
@@ -2582,13 +2693,27 @@ pub trait EventContent: Clone + core::fmt::Debug + Default {
     fn get_redacts(&self) -> Option<&str> {
         None
     }
+    /// Returns a top-level string field of the content, if present.
+    ///
+    /// Used for display projections (`name`, `topic`, `url`, `alias`,
+    /// `algorithm`) that auth never reads. Defaults to `None` for content
+    /// types that don't expose raw fields.
+    fn get_str_field(&self, key: &str) -> Option<&str> {
+        let _ = key;
+        None
+    }
     /// Specific to V12+ rooms.
     fn has_additional_creator(&self, sender: &str) -> bool;
     /// Returns `true` if `additional_creators` is absent, or present as an
     /// array of strings each passing the same MXID grammar as `sender`
     /// (rule 1.4, V12+). Defaults to permissive (`true`) for content types
     /// that don't expose the raw array.
-    fn additional_creators_are_valid(&self) -> bool {
+    ///
+    /// With `principals` set (room versions that use opaque principal
+    /// identifiers, e.g. Cygnus), entries are checked against
+    /// [`is_valid_principal_identifier`] instead.
+    fn additional_creators_are_valid(&self, principals: bool) -> bool {
+        let _ = principals;
         true
     }
     /// Returns the `join_authorised_via_users_server` field, if present.
@@ -2768,6 +2893,10 @@ impl EventContent for Value {
             .as_str()
     }
 
+    fn get_str_field(&self, key: &str) -> Option<&str> {
+        self.get(key)?.as_str()
+    }
+
     fn get_cdo_active_member(&self) -> Option<&str> {
         self.get("tk.nutra.cdo")?.get("active_member")?.as_str()
     }
@@ -2855,12 +2984,19 @@ impl EventContent for Value {
             .is_some_and(|arr| arr.iter().any(|v| v.as_str() == Some(sender)))
     }
 
-    fn additional_creators_are_valid(&self) -> bool {
+    fn additional_creators_are_valid(&self, principals: bool) -> bool {
         match self.get(crate::basespec::event_types::FIELD_ADDITIONAL_CREATORS) {
             None => true,
             Some(v) => v.as_array().is_some_and(|arr| {
-                arr.iter()
-                    .all(|entry| entry.as_str().is_some_and(is_acceptable_historical_mxid))
+                arr.iter().all(|entry| {
+                    entry.as_str().is_some_and(|id| {
+                        if principals {
+                            is_valid_principal_identifier(id)
+                        } else {
+                            is_acceptable_historical_mxid(id)
+                        }
+                    })
+                })
             }),
         }
     }
@@ -3029,9 +3165,21 @@ fn room_version_is_v11_or_later(room_version: &str) -> bool {
 
 /// Returns `true` if the room version requires strict canonical JSON numbers.
 ///
-/// Delegates to [`RoomVersionFormat::requires_strict_canonical_numbers`] for
+/// Delegates to `RoomVersionFormat::requires_strict_canonical_numbers` for
 /// the authoritative capability check, falling back to `false` for
 /// unparsable version strings.
+/// Returns `true` when events in `room_version` must use Matrix canonical JSON
+/// numbers (integers within ±(2^53 − 1), no floats or exponents), which room
+/// version 6 and later enforce. Pre-v6 events may legitimately carry floats, and
+/// unrecognised versions return `false`.
+///
+/// Persist or hash pre-v6 events with the permissive writer; use the strict
+/// canonical writer when this returns `true`.
+#[must_use]
+pub fn requires_strict_canonical_numbers(room_version: &str) -> bool {
+    room_version_is_v6_or_later(room_version)
+}
+
 fn room_version_is_v6_or_later(room_version: &str) -> bool {
     RoomVersionFormat::parse(room_version)
         .is_some_and(RoomVersionFormat::requires_strict_canonical_numbers)
@@ -3223,6 +3371,11 @@ impl<Id, C, K> LeanEvent<Id, C, K> {
         Ok(())
     }
 
+    ///
+    /// Cygnus senders use principal identifiers; other room versions retain
+    /// Validates the event ID, sender identity, and create-event identifiers.
+    /// Cygnus senders use principal identifiers; other room versions retain
+    /// MXID syntax and historical-ID compatibility handling.
     fn validate_identifiers(
         &self,
         room_version: &str,
@@ -3236,10 +3389,18 @@ impl<Id, C, K> LeanEvent<Id, C, K> {
         if event_id.is_empty() || !event_id.starts_with('$') {
             return Err("event_id must start with '$'");
         }
-        self.validate_mxid(&self.sender, MxidField::Sender, warnings)?;
+        if uses_principal_identifiers(room_version) {
+            if !is_valid_principal_identifier(&self.sender) {
+                return Err("sender must be a valid principal identifier: '@' followed by base64url characters");
+            }
+        } else {
+            self.validate_mxid(&self.sender, MxidField::Sender, warnings)?;
+        }
         self.validate_create_identifiers(room_version, warnings)
     }
 
+    /// Validates an MXID and records a compatibility warning for historical
+    /// MXIDs that the room version accepts.
     fn validate_mxid(
         &self,
         mxid: &str,
@@ -3283,7 +3444,7 @@ impl<Id, C, K> LeanEvent<Id, C, K> {
         if StateResVersion::from_room_version(room_version).is_some_and(|v| v.is_v2_1_plus()) {
             return self
                 .content
-                .additional_creators_are_valid()
+                .additional_creators_are_valid(uses_principal_identifiers(room_version))
                 .then_some(())
                 .ok_or(
                 "m.room.create content.additional_creators must be an array of valid MXID strings",
@@ -3957,10 +4118,12 @@ pub fn coerce_json_integer_parts(
         .or_else(|| {
             float.and_then(|f| {
                 // `Number::from_f64(...).as_i64()` can't be used here: the JSON
-                // returns `None` for float-backed numbers. Truncate the f64 and
-                // range-check before casting instead.
-                let t = f.trunc();
-                (t >= i64::MIN as f64 && t <= i64::MAX as f64).then_some(t as i64)
+                // returns `None` for float-backed numbers. `as` truncates toward
+                // zero (so no `f64::trunc`, which needs `std`); range-check first.
+                // Checking `f` instead of `trunc(f)` gives the same result: at
+                // ±2^63 adjacent f64s are 2048 apart, so truncation cannot move a
+                // value across either bound. NaN and infinities fail the check.
+                (f >= i64::MIN as f64 && f <= i64::MAX as f64).then_some(f as i64)
             })
         })
         .or_else(|| string.and_then(|s| s.parse::<i64>().ok()));
@@ -4011,6 +4174,39 @@ impl<
 {
     fn get_event(&self, id: &Id) -> Option<&E> {
         self.primary.get(id).or_else(|| self.secondary.get(id))
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod coerce_json_integer_parts_tests {
+    use super::{coerce_json_integer_parts, MAX_POWER_LEVEL_JSON};
+
+    fn float(f: f64) -> Option<i64> {
+        coerce_json_integer_parts(None, None, Some(f), None)
+    }
+
+    #[test]
+    fn floats_truncate_toward_zero() {
+        assert_eq!(float(50.0), Some(50));
+        assert_eq!(float(50.9), Some(50));
+        assert_eq!(float(-50.9), Some(-50));
+        assert_eq!(float(-0.5), Some(0));
+    }
+
+    #[test]
+    fn non_finite_floats_are_rejected() {
+        assert_eq!(float(f64::NAN), None);
+        assert_eq!(float(f64::INFINITY), None);
+        assert_eq!(float(f64::NEG_INFINITY), None);
+    }
+
+    #[test]
+    fn out_of_range_floats_are_rejected_and_large_ones_clamped() {
+        assert_eq!(float(1e300), None);
+        assert_eq!(float(-1e300), None);
+        assert_eq!(float(9.0e18), Some(MAX_POWER_LEVEL_JSON));
+        assert_eq!(float(-9.0e18), Some(-MAX_POWER_LEVEL_JSON));
     }
 }
 
@@ -4433,6 +4629,35 @@ mod canonical_parity_tests {
     /// The writer serialises it as "-0.0" which contains '.', so the
     /// fractional branch rejects it.
     #[test]
+    fn strict_canonical_numbers_start_at_room_version_6() {
+        for v in ["1", "2", "3", "4", "5"] {
+            assert!(!requires_strict_canonical_numbers(v), "v{v}");
+        }
+        for v in ["6", "10", "11", "12"] {
+            assert!(requires_strict_canonical_numbers(v), "v{v}");
+        }
+        assert!(!requires_strict_canonical_numbers("not-a-version"));
+    }
+
+    #[test]
+    fn validate_canonical_number_rejects_integers_wider_than_u64() {
+        use super::validate_canonical_number;
+        for text in [
+            "18446744073709551616",
+            "-9223372036854775809",
+            "9007199254740992",
+        ] {
+            let n = crate::json::Value::parse(text).unwrap();
+            let crate::json::Value::Number(n) = n else {
+                panic!("not a number")
+            };
+            assert!(validate_canonical_number(&n).is_err(), "accepted {text}");
+        }
+        let ok = crate::json::Number::from(9_007_199_254_740_991_u64);
+        assert!(validate_canonical_number(&ok).is_ok());
+    }
+
+    #[test]
     fn validate_canonical_number_rejects_negative_zero_f64() {
         use super::validate_canonical_number;
         let neg_zero = crate::json::Number::from_f64(-0.0).expect("from_f64");
@@ -4562,6 +4787,34 @@ mod canonical_parity_tests {
         assert!(
             try_canonical_redacted_json(&fractional, "org.matrix.msc4242.12").is_err(),
             "try_canonical_redacted_json MSC4242"
+        );
+    }
+
+    /// MSC4014 (pseudonymous IDs) hashes and redacts exactly like room v10.
+    #[test]
+    fn msc4014_hashes_like_v10() {
+        let event = json!({
+            "type": "m.room.member",
+            "room_id": "!r:example.org",
+            "sender": "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG",
+            "state_key": "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG",
+            "content": {"membership": "join", "displayname": "x"},
+            "origin_server_ts": 1,
+            "depth": 1,
+            "prev_events": [],
+            "auth_events": [],
+            "signatures": {"example.org": {"ed25519:a": "sig"}},
+        });
+        let v = "org.matrix.msc4014";
+        assert_eq!(reference_hash(&event, v), reference_hash(&event, "10"));
+        assert!(reference_hash(&event, v).is_ok());
+        assert_eq!(
+            compute_content_hash(&event, v),
+            compute_content_hash(&event, "10")
+        );
+        assert_eq!(
+            try_canonical_redacted_json(&event, v),
+            try_canonical_redacted_json(&event, "10")
         );
     }
 

@@ -1,13 +1,33 @@
-//! Generic HAMT primitives used by higher-level state handling.
+//! Content-addressed persistent HAMT (CHAMP), generic over key and value types.
+//!
+//! Keys and values are any types with a [`HamtCodec`] encoding. Nodes are
+//! immutable records addressed by a keyed BLAKE3 structural hash, writes
+//! path-copy and share every unchanged subtree, and nothing here knows what a
+//! key or value means. The Matrix room-state root record built on it lives in
+//! [`crate::state::hamt_root`].
 //!
 //! Layout:
 //! - `hash`: keyed structural hashing for subtree identity
-//! - `codec`: dense on-disk encoding for persisted internal nodes
+//! - `codec`: dense on-disk encoding for persisted internal nodes, and the
+//!   routing bytes of a key
 //! - `delta`: subtree differencing for set isolation
 //! - `audit`: multi-root reachability audit for storage GC
+//! - `reader`: lazy, verified reads of persisted nodes
 //! - `gc`: experimental incremental refcount bookkeeping for integrations
 //!   with a strictly linear root history (behind `unstable-refcount-gc`)
 //! - `tests`: regression coverage for the generic HAMT core
+//!
+//! # Routing
+//!
+//! Every default-routed operation hashes a key's [`HamtRoutingKey`] bytes,
+//! which for a [`HamtCodec`] type are its persisted encoding ([`key_path_hash`]).
+//! A tree's shape therefore depends only on the encoded keys and the structural
+//! key, never on a Rust `Hash` implementation, so the same entries give
+//! byte-identical nodes in every process, version and architecture, and a
+//! persisted tree can be read by anything that knows its codec. Lookups may
+//! pass a borrowed key (`&str` for `String`) whose routing bytes match its
+//! owned form. Callers with a precomputed path hash can use the
+//! `*_by_path_hash` lookup entry points.
 //!
 //! # Release notes
 //!
@@ -21,11 +41,7 @@
 //!   new names; at the time of the rename neither had any caller.
 
 use alloc::{sync::Arc, vec, vec::Vec};
-use core::{
-    borrow::Borrow,
-    fmt,
-    hash::{Hash, Hasher},
-};
+use core::{borrow::Borrow, fmt};
 
 pub mod audit;
 pub mod codec;
@@ -33,6 +49,7 @@ pub mod delta;
 #[cfg(any(test, feature = "unstable-refcount-gc"))]
 pub mod gc;
 pub mod hash;
+pub mod reader;
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -44,11 +61,12 @@ pub use audit::{
     UniverseTooLarge,
 };
 pub use codec::{
-    HamtCodec, PersistedInternalNode, HAMT_NODE_MAGIC, HAMT_ROOT_MAGIC, HAMT_WIRE_VERSION,
+    HamtCodec, HamtRoutingKey, HamtStrCodec, PersistedInternalNode, HAMT_NODE_MAGIC,
+    HAMT_ROOT_MAGIC, HAMT_WIRE_VERSION,
 };
 pub use delta::{
-    diff_hamt_nodes, diff_node_hashes, isolate_delta, reachable_node_hashes,
-    walk_reachable_node_hashes, Delta, DeltaResult, HamtTraversalError, NodeHashDelta,
+    diff_hamt_nodes, diff_node_hashes, reachable_node_hashes, walk_reachable_node_hashes, Delta,
+    DeltaResult, HamtTraversalError, NodeHashDelta,
 };
 #[cfg(feature = "unstable-refcount-gc")]
 pub use gc::{LinearRootChain, RefcountTable, RefcountUnderflow};
@@ -56,6 +74,49 @@ pub use hash::{
     state_group_id_from_lthash, RootHandle, StateGroupId, StructuralHash, HAMT_CODEC_VERSION,
     HAMT_ROUTING_VERSION,
 };
+pub use reader::{HamtReadError, PersistedHamtReader};
+
+/// Error from [`HamtNode::visit_entries`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum HamtVisitError<ResolveE, VisitorE> {
+    /// A lazy child could not be loaded.
+    Resolve(ResolveE),
+    /// The caller's visitor rejected an entry.
+    Visitor(VisitorE),
+    /// A node is malformed for its position in the tree.
+    CorruptNode(&'static str),
+    /// The walk exceeded the maximum HAMT depth.
+    MaxDepthExceeded { depth: usize },
+}
+
+impl<ResolveE: fmt::Display, VisitorE: fmt::Display> fmt::Display
+    for HamtVisitError<ResolveE, VisitorE>
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Resolve(error) => write!(f, "hamt entry walk resolver failed: {error}"),
+            Self::Visitor(error) => write!(f, "hamt entry visitor failed: {error}"),
+            Self::CorruptNode(reason) => write!(f, "hamt entry walk corrupt node: {reason}"),
+            Self::MaxDepthExceeded { depth } => {
+                write!(f, "hamt entry walk exceeded max depth at {depth}")
+            }
+        }
+    }
+}
+
+impl<ResolveE, VisitorE> core::error::Error for HamtVisitError<ResolveE, VisitorE>
+where
+    ResolveE: core::error::Error + 'static,
+    VisitorE: core::error::Error + 'static,
+{
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Resolve(error) => Some(error),
+            Self::Visitor(error) => Some(error),
+            Self::CorruptNode(_) | Self::MaxDepthExceeded { .. } => None,
+        }
+    }
+}
 
 /// 256-bit routing path hash for a key in the HAMT.
 pub type KeyPathHash = StructuralHash;
@@ -81,13 +142,13 @@ impl<K, V, E, F> NodeResolver<K, V, E> for F where
 {
 }
 
-/// A key storable in a HAMT: hashable, comparable, cloneable, and codec-able.
+/// A key storable in a HAMT: comparable, cloneable, and codec-able.
 ///
 /// Blanket-implemented; callers never implement it themselves. Names the bound
 /// shared by the HAMT descent, mutation, and persistence entry points.
-pub trait HamtKey: Hash + Eq + Clone + HamtCodec {}
+pub trait HamtKey: Eq + Clone + HamtCodec {}
 
-impl<K: Hash + Eq + Clone + HamtCodec> HamtKey for K {}
+impl<K: Eq + Clone + HamtCodec> HamtKey for K {}
 
 /// A value storable in a HAMT: cloneable and codec-able.
 ///
@@ -98,9 +159,16 @@ impl<V: Clone + HamtCodec> HamtValue for V {}
 
 /// The outcome of descending one level of a HAMT with a batch of requested keys.
 #[derive(Debug, PartialEq, Eq)]
-pub struct DescendResult<V> {
-    /// Keys found at this level with their associated value.
-    pub found: Vec<(KeyPathHash, V)>,
+pub struct DescendResult<K, V> {
+    /// Entries whose full 256-bit `KeyPathHash` matched a requested hash, with
+    /// their decoded key and value.
+    ///
+    /// Because `descend_level` routes by `KeyPathHash` alone, `found` proves
+    /// hash equality rather than key equality: at a terminal collision bucket
+    /// every leaf in the bucket shares `req_hash` and is emitted here, even if
+    /// the caller's target key is an absent colliding key. Callers must compare
+    /// the decoded `K` against their requested key.
+    pub found: Vec<(KeyPathHash, K, V)>,
     /// Keys proven to be absent at this level (the corresponding slot bit was clear).
     pub absent: Vec<KeyPathHash>,
     /// Keys that need to descend further (to `depth + 1`), grouped by the child node's `StructuralHash`.
@@ -187,6 +255,38 @@ pub struct HamtNode<K, V> {
 }
 
 impl<K, V> HamtNode<K, V> {
+    /// Returns whether this node is a terminal collision bucket (the MTHC
+    /// sentinel shape: no slot maps, no children, and at least two inline
+    /// entries).
+    ///
+    /// A valid bucket only ever appears at `HAMT_MAX_DEPTH`; callers that
+    /// care about structural correctness must still check the depth.
+    #[must_use]
+    pub fn is_collision(&self) -> bool {
+        self.datamap == 0 && self.nodemap == 0 && self.leaves.len() > 1 && self.children.is_empty()
+    }
+
+    /// Returns why this node's in-memory shape is internally inconsistent.
+    ///
+    /// A collision bucket is a valid shape on its own; whether it is legal at
+    /// a particular depth is a separate check. This validates the bitmap/array
+    /// correspondence every traversal relies on before it indexes anything.
+    pub(crate) fn shape_error(&self) -> Option<&'static str> {
+        if self.datamap & self.nodemap != 0 {
+            return Some("datamap and nodemap overlap");
+        }
+        if self.is_collision() {
+            return None;
+        }
+        if self.leaves.len() != self.datamap.count_ones() as usize {
+            return Some("leaf count does not match datamap");
+        }
+        if self.children.len() != self.nodemap.count_ones() as usize {
+            return Some("child count does not match nodemap");
+        }
+        None
+    }
+
     /// Computes the structural hash of this node from its contents.
     ///
     pub fn compute_structural_hash(
@@ -207,8 +307,8 @@ impl<K, V> HamtNode<K, V> {
         let canonical_bytes =
             PersistedInternalNode::encode_v1_parts(datamap, nodemap, leaves, &child_hashes);
         let mut mac = StructuralHashBuilder::new(key);
-        mac.write(STRUCTURAL_HASH_DOMAIN_V1);
-        mac.write(&canonical_bytes);
+        mac.update(STRUCTURAL_HASH_DOMAIN_V1);
+        mac.update(&canonical_bytes);
         mac.finalize()
     }
 
@@ -217,34 +317,16 @@ impl<K, V> HamtNode<K, V> {
     /// This is the cheapest read path and should be used when the tree is
     /// already fully resolved in memory.
     ///
-    /// This variant hashes the key with the same keyed structural hash used
-    /// for trees built by [`build_hamt`]. If the tree was built with
-    /// [`build_hamt_with_key_hash`], use [`Self::get_with_key_hash`] or
-    /// [`Self::get_by_path_hash`] with the exact routing hash used when the
-    /// tree was constructed.
+    /// A malformed node shape is treated as a missing key because this API
+    /// returns `Option`; persisted reads should use [`PersistedHamtReader`],
+    /// which reports malformed depth/shape as an error.
     #[must_use]
     pub fn get<Q>(&self, structural_key: &[u8], key: &Q) -> Option<&V>
     where
-        K: Hash + Eq + Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
+        K: Eq + Borrow<Q>,
+        Q: HamtRoutingKey + Eq + ?Sized,
     {
         let path_hash = key_path_hash(structural_key, key);
-        self.get_by_path_hash(key, &path_hash)
-    }
-
-    /// Looks up a key using a caller-provided path-hash function.
-    ///
-    /// This matches [`build_hamt_with_key_hash`] and is required when the tree
-    /// was built with a custom routing function instead of the default keyed
-    /// structural hash.
-    #[must_use]
-    pub fn get_with_key_hash<Q, F>(&self, key: &Q, mut key_hash: F) -> Option<&V>
-    where
-        K: Eq + Borrow<Q>,
-        Q: Eq + ?Sized,
-        F: FnMut(&Q) -> StructuralHash,
-    {
-        let path_hash = key_hash(key);
         self.get_by_path_hash(key, &path_hash)
     }
 
@@ -253,6 +335,9 @@ impl<K, V> HamtNode<K, V> {
     /// This is the most general lookup entry point. Use it when the caller
     /// already knows the exact path hash that was used to build or mutate the
     /// tree.
+    ///
+    /// A malformed node shape is treated as a missing key; persisted reads
+    /// should use [`PersistedHamtReader`], which reports corruption.
     #[must_use]
     pub fn get_by_path_hash<Q>(&self, key: &Q, path_hash: &StructuralHash) -> Option<&V>
     where
@@ -270,12 +355,8 @@ impl<K, V> HamtNode<K, V> {
     ///
     /// # Errors
     /// Returns the error from `resolver` if a lazy child cannot be loaded.
-    ///
-    /// This variant hashes the key with the same keyed structural hash used
-    /// for trees built by [`build_hamt`]. If the tree was built with
-    /// [`build_hamt_with_key_hash`], use [`Self::search_with_key_hash`] or
-    /// [`Self::search_by_path_hash`] with the exact routing hash used when the
-    /// tree was constructed.
+    /// A malformed node shape is treated as a missing key; use
+    /// [`PersistedHamtReader`] when persisted-data corruption must be reported.
     pub fn search<Q, F, E>(
         &self,
         structural_key: &[u8],
@@ -283,36 +364,12 @@ impl<K, V> HamtNode<K, V> {
         resolver: &mut F,
     ) -> Result<Option<V>, E>
     where
-        K: Hash + Eq + Borrow<Q>,
+        K: Eq + Borrow<Q>,
         V: Clone,
-        Q: Hash + Eq + ?Sized,
+        Q: HamtRoutingKey + Eq + ?Sized,
         F: NodeResolver<K, V, E>,
     {
         let path_hash = key_path_hash(structural_key, key);
-        self.search_by_path_hash(key, &path_hash, resolver)
-    }
-
-    /// Looks up a key using a caller-provided path-hash function.
-    ///
-    /// This is the search equivalent of [`Self::get_with_key_hash`] for HAMTs built
-    /// with [`build_hamt_with_key_hash`].
-    ///
-    /// # Errors
-    /// Returns the error from `resolver` if a lazy child cannot be loaded.
-    pub fn search_with_key_hash<Q, KeyHash, F, E>(
-        &self,
-        key: &Q,
-        mut key_hash: KeyHash,
-        resolver: &mut F,
-    ) -> Result<Option<V>, E>
-    where
-        K: Eq + Borrow<Q>,
-        V: Clone,
-        Q: Eq + ?Sized,
-        KeyHash: FnMut(&Q) -> StructuralHash,
-        F: NodeResolver<K, V, E>,
-    {
-        let path_hash = key_hash(key);
         self.search_by_path_hash(key, &path_hash, resolver)
     }
 
@@ -324,6 +381,8 @@ impl<K, V> HamtNode<K, V> {
     ///
     /// # Errors
     /// Returns the error from `resolver` if a lazy child cannot be loaded.
+    /// A malformed node shape is treated as a missing key; use
+    /// [`PersistedHamtReader`] when persisted-data corruption must be reported.
     pub fn search_by_path_hash<Q, F, E>(
         &self,
         key: &Q,
@@ -336,25 +395,72 @@ impl<K, V> HamtNode<K, V> {
         Q: Eq + ?Sized,
         F: NodeResolver<K, V, E>,
     {
-        // Iterative descent with a single owned cursor for resolved children:
-        // each child is an `Arc`, so replacing the cursor drops the previous
-        // node without retaining the ancestor chain.
-        let mut cursor: Option<NodePtr<K, V>> = None;
-        for depth in 0..HAMT_MAX_DEPTH {
-            let node: &HamtNode<K, V> = match &cursor {
-                Some(child) => child,
-                None => self,
-            };
-            match node.slot_at(path_hash, depth) {
-                Slot::Leaf((stored_key, value)) => {
-                    return Ok((stored_key.borrow() == key).then(|| value.clone()));
-                }
-                Slot::Child(NodeRef::Resolved(child)) => cursor = Some(child.clone()),
-                Slot::Child(NodeRef::Lazy(hash)) => cursor = Some(resolver(hash)?),
-                Slot::Empty => return Ok(None),
+        match self.search_by_path_hash_checked(
+            key,
+            path_hash,
+            resolver,
+            &mut |_, _, _| Ok(()),
+            &mut |_, _| Ok(()),
+        ) {
+            Ok(found) => Ok(found),
+            Err(HamtTraversalError::Resolve(error)) => Err(error),
+            Err(
+                HamtTraversalError::CorruptNode(_) | HamtTraversalError::MaxDepthExceeded { .. },
+            ) => {
+                // Preserve the historical Option-like behavior of this API
+                // for malformed in-memory trees.
+                Ok(None)
             }
         }
-        Ok(None)
+    }
+
+    /// Shared checked descent used by in-memory search and persisted reads.
+    /// Validators let persisted callers enforce routing without duplicating
+    /// slot traversal or its shape checks.
+    pub(crate) fn search_by_path_hash_checked<Q, F, E, L, C>(
+        &self,
+        key: &Q,
+        path_hash: &StructuralHash,
+        resolver: &mut F,
+        validate_leaf: &mut L,
+        validate_collision: &mut C,
+    ) -> Result<Option<V>, HamtTraversalError<E>>
+    where
+        K: Eq + Borrow<Q>,
+        V: Clone,
+        Q: Eq + ?Sized,
+        F: NodeResolver<K, V, E>,
+        L: FnMut(&K, &StructuralHash, usize) -> Result<(), &'static str>,
+        C: FnMut(&[(K, V)], &StructuralHash) -> Result<(), &'static str>,
+    {
+        // Iterative descent with a single owned cursor for resolved children.
+        // `check_node_depth` makes depth `HAMT_MAX_DEPTH` terminal, so every
+        // loop iteration either returns or advances one level deeper.
+        let mut cursor: Option<NodePtr<K, V>> = None;
+        let mut depth = 0_usize;
+        loop {
+            let node: &HamtNode<K, V> = cursor.as_deref().unwrap_or(self);
+            delta::check_node_depth(node, depth)?;
+            if node.is_collision() {
+                validate_collision(&node.leaves, path_hash)
+                    .map_err(HamtTraversalError::CorruptNode)?;
+                return Ok(node
+                    .leaves
+                    .iter()
+                    .find(|(stored_key, _)| stored_key.borrow() == key)
+                    .map(|(_, value)| value.clone()));
+            }
+            match node.slot_at(path_hash, depth) {
+                Slot::Leaf((stored_key, value)) => {
+                    validate_leaf(stored_key, path_hash, depth)
+                        .map_err(HamtTraversalError::CorruptNode)?;
+                    return Ok((stored_key.borrow() == key).then(|| value.clone()));
+                }
+                Slot::Child(child) => cursor = Some(delta::resolve_node_checked(child, resolver)?),
+                Slot::Empty => return Ok(None),
+            }
+            depth = depth.saturating_add(1);
+        }
     }
 
     /// Visits every key/value pair in the HAMT, resolving lazy children as
@@ -364,22 +470,49 @@ impl<K, V> HamtNode<K, V> {
     /// stream or collect the full contents of a subtree.
     ///
     /// # Errors
-    /// Returns the error from either `resolver` or `visitor`.
-    pub fn visit_entries<F, E>(
+    /// Returns [`HamtVisitError::Resolve`] or [`HamtVisitError::Visitor`] for
+    /// callback failures, and reports malformed node shape or depth instead
+    /// of silently returning an incomplete collection.
+    pub fn visit_entries<F, ResolveE, VisitorE>(
         &self,
         resolver: &mut F,
-        visitor: &mut impl FnMut(&K, &V) -> Result<(), E>,
-    ) -> Result<(), E>
+        visitor: &mut impl FnMut(&K, &V) -> Result<(), VisitorE>,
+    ) -> Result<(), HamtVisitError<ResolveE, VisitorE>>
     where
-        F: NodeResolver<K, V, E>,
+        F: NodeResolver<K, V, ResolveE>,
     {
+        self.visit_entries_inner(resolver, visitor, 0)
+    }
+
+    /// Depth-checked implementation of [`Self::visit_entries`].
+    fn visit_entries_inner<F, ResolveE, VisitorE>(
+        &self,
+        resolver: &mut F,
+        visitor: &mut impl FnMut(&K, &V) -> Result<(), VisitorE>,
+        depth: usize,
+    ) -> Result<(), HamtVisitError<ResolveE, VisitorE>>
+    where
+        F: NodeResolver<K, V, ResolveE>,
+    {
+        delta::check_node_depth(self, depth).map_err(|error| match error {
+            HamtTraversalError::Resolve(error) => HamtVisitError::Resolve(error),
+            HamtTraversalError::CorruptNode(reason) => HamtVisitError::CorruptNode(reason),
+            HamtTraversalError::MaxDepthExceeded { depth } => {
+                HamtVisitError::MaxDepthExceeded { depth }
+            }
+        })?;
         for (key, value) in &self.leaves {
-            visitor(key, value)?;
+            visitor(key, value).map_err(HamtVisitError::Visitor)?;
+        }
+
+        if self.is_collision() {
+            return Ok(());
         }
 
         for child in &self.children {
-            let child_node = delta::resolve_node(child, resolver)?;
-            child_node.visit_entries(resolver, visitor)?;
+            let child_node =
+                delta::resolve_node(child, resolver).map_err(HamtVisitError::Resolve)?;
+            child_node.visit_entries_inner(resolver, visitor, depth.saturating_add(1))?;
         }
 
         Ok(())
@@ -390,122 +523,7 @@ impl<K, V> HamtNode<K, V> {
     /// This is an O(1) structural check on the node's bitmaps.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.datamap == 0 && self.nodemap == 0
-    }
-
-    /// Checks if any key-value entry in the HAMT satisfies a predicate.
-    ///
-    /// Traversal proceeds lazily across child nodes, returning `Ok(true)` and
-    /// stopping immediately on the first entry for which `predicate(&key, &value)`
-    /// returns `Ok(true)`. Returns `Ok(false)` if no matching entry is found.
-    ///
-    /// # Errors
-    /// Returns [`HamtTraversalError::Resolve`] with the error emitted by
-    /// `resolver` or `predicate`, or [`HamtTraversalError::MaxDepthExceeded`]
-    /// if the walk recurses past the deepest depth a legitimately-built HAMT
-    /// can have.
-    pub fn any_entry<F, E>(
-        &self,
-        resolver: &mut F,
-        predicate: &mut impl FnMut(&K, &V) -> Result<bool, E>,
-    ) -> Result<bool, HamtTraversalError<E>>
-    where
-        F: NodeResolver<K, V, E>,
-    {
-        self.any_entry_inner(resolver, predicate, 0)
-    }
-
-    fn any_entry_inner<F, E>(
-        &self,
-        resolver: &mut F,
-        predicate: &mut impl FnMut(&K, &V) -> Result<bool, E>,
-        depth: usize,
-    ) -> Result<bool, HamtTraversalError<E>>
-    where
-        F: NodeResolver<K, V, E>,
-    {
-        crate::hamt::delta::check_depth(depth)?;
-        let next_depth = depth.saturating_add(1);
-
-        if self.first_matching_leaf(predicate)?.is_some() {
-            return Ok(true);
-        }
-
-        for child in &self.children {
-            let child_node = delta::resolve_node_checked(child, resolver)?;
-            if child_node.any_entry_inner(resolver, predicate, next_depth)? {
-                return Ok(true);
-            }
-        }
-
-        Ok(false)
-    }
-
-    /// Returns the first leaf (in slot order) for which `predicate` yields
-    /// `Ok(true)`, resolving the predicate's error into
-    /// [`HamtTraversalError`] the same way the recursive walkers do.
-    fn first_matching_leaf<E>(
-        &self,
-        predicate: &mut impl FnMut(&K, &V) -> Result<bool, E>,
-    ) -> Result<Option<&(K, V)>, HamtTraversalError<E>> {
-        for entry in &self.leaves {
-            if predicate(&entry.0, &entry.1).map_err(HamtTraversalError::Resolve)? {
-                return Ok(Some(entry));
-            }
-        }
-        Ok(None)
-    }
-
-    /// Finds the first key-value entry in the HAMT that satisfies a predicate.
-    ///
-    /// Traversal proceeds lazily across child nodes, returning `Ok(Some((key, value)))`
-    /// and stopping immediately on the first entry for which `predicate(&key, &value)`
-    /// returns `Ok(true)`. Returns `Ok(None)` if no matching entry is found.
-    ///
-    /// # Errors
-    /// Returns [`HamtTraversalError::Resolve`] with the error emitted by
-    /// `resolver` or `predicate`, or [`HamtTraversalError::MaxDepthExceeded`]
-    /// if the walk recurses past the deepest depth a legitimately-built HAMT
-    /// can have.
-    pub fn find_entry<F, E>(
-        &self,
-        resolver: &mut F,
-        predicate: &mut impl FnMut(&K, &V) -> Result<bool, E>,
-    ) -> Result<Option<(K, V)>, HamtTraversalError<E>>
-    where
-        K: Clone,
-        V: Clone,
-        F: NodeResolver<K, V, E>,
-    {
-        self.find_entry_inner(resolver, predicate, 0)
-    }
-
-    fn find_entry_inner<F, E>(
-        &self,
-        resolver: &mut F,
-        predicate: &mut impl FnMut(&K, &V) -> Result<bool, E>,
-        depth: usize,
-    ) -> Result<Option<(K, V)>, HamtTraversalError<E>>
-    where
-        K: Clone,
-        V: Clone,
-        F: NodeResolver<K, V, E>,
-    {
-        crate::hamt::delta::check_depth(depth)?;
-        let next_depth = depth.saturating_add(1);
-
-        if let Some((key, value)) = self.first_matching_leaf(predicate)? {
-            return Ok(Some((key.clone(), value.clone())));
-        }
-
-        for child in &self.children {
-            let child_node = delta::resolve_node_checked(child, resolver)?;
-            if let Some(entry) = child_node.find_entry_inner(resolver, predicate, next_depth)? {
-                return Ok(Some(entry));
-            }
-        }
-
-        Ok(None)
+        self.datamap == 0 && self.nodemap == 0 && self.leaves.is_empty() && self.children.is_empty()
     }
 
     /// Resolves which slot `path_hash` routes to at `depth` and returns what
@@ -539,6 +557,19 @@ impl<K, V> HamtNode<K, V> {
         K: Eq + Borrow<Q>,
         Q: Eq + ?Sized,
     {
+        if self.shape_error().is_some() {
+            return None;
+        }
+        if self.is_collision() {
+            if depth != HAMT_MAX_DEPTH {
+                return None;
+            }
+            return self
+                .leaves
+                .iter()
+                .find(|(stored_key, _)| stored_key.borrow() == key)
+                .map(|(_, value)| value);
+        }
         if depth >= HAMT_MAX_DEPTH {
             return None;
         }
@@ -561,75 +592,79 @@ enum Slot<'a, K, V> {
     Empty,
 }
 
-/// Errors that can occur while building a HAMT from an entry iterator.
-#[derive(Debug, PartialEq, Eq)]
-pub enum HamtBuildError {
-    /// Too many entries collided into the same slot after exhausting the
-    /// available hash depth.
-    HashCollision { depth: usize, bucket_size: usize },
-}
-
-impl fmt::Display for HamtBuildError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::HashCollision { depth, bucket_size } => write!(
-                f,
-                "hamt build hash collision at depth {depth} with bucket size {bucket_size}"
-            ),
-        }
+/// Returns the shared route for a terminal collision bucket, rejecting a
+/// bucket whose keys do not all consume the same complete path hash.
+pub(crate) fn collision_route_hash<K, V, F>(
+    leaves: &[(K, V)],
+    mut route: F,
+) -> Result<StructuralHash, &'static str>
+where
+    F: FnMut(&K) -> StructuralHash,
+{
+    let Some((first_key, _)) = leaves.first() else {
+        return Err("collision bucket is empty");
+    };
+    let hash = route(first_key);
+    if leaves.iter().skip(1).any(|(key, _)| route(key) != hash) {
+        return Err("leaf routed to wrong slot");
     }
+    Ok(hash)
 }
 
-impl core::error::Error for HamtBuildError {}
+/// Validates that `leaf_hash` agrees with `expected_route` at `depth` (its own
+/// node's slot) and across `0..depth` (the ancestor slots that led to this node).
+pub(crate) fn validate_leaf_route_prefix(
+    leaf_hash: &StructuralHash,
+    expected_route: &StructuralHash,
+    depth: usize,
+) -> Result<(), &'static str> {
+    if bucket_index(leaf_hash, depth) != bucket_index(expected_route, depth) {
+        return Err("leaf routed to wrong slot");
+    }
+    if (0..depth).any(|level| bucket_index(leaf_hash, level) != bucket_index(expected_route, level))
+    {
+        return Err("leaf does not match its trie path");
+    }
+    Ok(())
+}
 
-fn key_path_hash<K: Hash + ?Sized>(structural_key: &[u8], key: &K) -> StructuralHash {
+/// Validates that `leaf_hash` selects `slot` at `ancestor_slots.len()` and
+/// matches every ancestor slot along `0..depth`.
+pub(crate) fn validate_leaf_slot_path(
+    leaf_hash: &StructuralHash,
+    ancestor_slots: &[usize],
+    slot: usize,
+) -> Result<(), &'static str> {
+    if bucket_index(leaf_hash, ancestor_slots.len()) != slot {
+        return Err("leaf routed to wrong slot");
+    }
+    if ancestor_slots
+        .iter()
+        .enumerate()
+        .any(|(level, &expected)| bucket_index(leaf_hash, level) != expected)
+    {
+        return Err("leaf does not match its trie path");
+    }
+    Ok(())
+}
+
+/// The routing hash of `key`: a keyed hash of its [`HamtRoutingKey`] bytes.
+///
+/// Every default-routed operation (`build_hamt`, `insert`, `remove`,
+/// `persist_mutation(s)`, `get`, `search`, and the persisted reader) uses this,
+/// so a tree routes by the persisted encoding of its keys and is byte-identical
+/// across processes, versions and architectures.
+#[must_use]
+pub fn key_path_hash<K: HamtRoutingKey + ?Sized>(structural_key: &[u8], key: &K) -> StructuralHash {
+    let mut encoded = Vec::new();
+    key.encode_routing(&mut encoded);
     let mut hasher = StructuralHashBuilder::new(structural_key);
-    key.hash(&mut hasher);
+    hasher.update(&encoded);
     hasher.finalize()
 }
 
-fn map_index(bitmap: u32, slot: usize) -> usize {
-    let mask = lower_slot_mask(slot);
-    (bitmap & mask).count_ones() as usize
-}
-
-const LOWER_SLOT_MASKS: [u32; 32] = [
-    0x0000_0000,
-    0x0000_0001,
-    0x0000_0003,
-    0x0000_0007,
-    0x0000_000f,
-    0x0000_001f,
-    0x0000_003f,
-    0x0000_007f,
-    0x0000_00ff,
-    0x0000_01ff,
-    0x0000_03ff,
-    0x0000_07ff,
-    0x0000_0fff,
-    0x0000_1fff,
-    0x0000_3fff,
-    0x0000_7fff,
-    0x0000_ffff,
-    0x0001_ffff,
-    0x0003_ffff,
-    0x0007_ffff,
-    0x000f_ffff,
-    0x001f_ffff,
-    0x003f_ffff,
-    0x007f_ffff,
-    0x00ff_ffff,
-    0x01ff_ffff,
-    0x03ff_ffff,
-    0x07ff_ffff,
-    0x0fff_ffff,
-    0x1fff_ffff,
-    0x3fff_ffff,
-    0x7fff_ffff,
-];
-
-fn lower_slot_mask(slot: usize) -> u32 {
-    LOWER_SLOT_MASKS.get(slot).copied().unwrap_or(u32::MAX)
+pub(super) fn map_index(bitmap: u32, slot: usize) -> usize {
+    (bitmap & (1_u32 << slot).wrapping_sub(1)).count_ones() as usize
 }
 
 fn bucket_index(hash: &StructuralHash, depth: usize) -> usize {
@@ -665,19 +700,37 @@ struct BuildEntry<K, V> {
     path_hash: StructuralHash,
 }
 
+/// Sorts a collision bucket into its canonical wire order (encoded key bytes).
+fn sort_collision_leaves<K: HamtCodec, V>(leaves: &mut [(K, V)]) {
+    leaves.sort_by_cached_key(|(key, _)| {
+        let mut bytes = Vec::new();
+        key.encode_hamt(&mut bytes);
+        bytes
+    });
+}
+
 fn build_node<K, V>(
     structural_key: &[u8],
     entries: Vec<BuildEntry<K, V>>,
     depth: usize,
-) -> Result<NodePtr<K, V>, HamtBuildError>
+) -> NodePtr<K, V>
 where
-    K: Hash + HamtCodec,
+    K: Eq + HamtCodec,
     V: HamtCodec,
 {
     if depth >= HAMT_MAX_DEPTH {
-        return Err(HamtBuildError::HashCollision {
-            depth,
-            bucket_size: entries.len(),
+        let mut leaves = entries
+            .into_iter()
+            .map(|entry| (entry.key, entry.value))
+            .collect::<Vec<_>>();
+        sort_collision_leaves(&mut leaves);
+        let structural_hash = HamtNode::compute_structural_hash(structural_key, 0, 0, &leaves, &[]);
+        return Arc::new(HamtNode {
+            datamap: 0,
+            nodemap: 0,
+            leaves,
+            children: Vec::new(),
+            structural_hash,
         });
     }
 
@@ -694,145 +747,154 @@ where
     let mut children = Vec::new();
 
     for (slot, mut bucket) in buckets.into_iter().enumerate() {
-        if bucket.is_empty() {
+        let Some(entry) = bucket.pop() else {
             continue;
-        }
-
+        };
         let bit = 1_u32 << slot;
-        if bucket.len() == 1 {
+        if bucket.is_empty() {
             datamap |= bit;
-            let entry = bucket
-                .pop()
-                .expect("singleton bucket must contain one entry");
             leaves.push((entry.key, entry.value));
             continue;
         }
-
-        let next_depth = depth.saturating_add(1);
-        if next_depth >= HAMT_MAX_DEPTH {
-            return Err(HamtBuildError::HashCollision {
-                depth,
-                bucket_size: bucket.len(),
-            });
-        }
-
+        bucket.push(entry);
         nodemap |= bit;
-        let child = build_node(structural_key, bucket, next_depth)?;
-        children.push(NodeRef::Resolved(child));
+        children.push(NodeRef::Resolved(build_node(
+            structural_key,
+            bucket,
+            depth.saturating_add(1),
+        )));
     }
 
     let structural_hash =
         HamtNode::compute_structural_hash(structural_key, datamap, nodemap, &leaves, &children);
-
-    Ok(Arc::new(HamtNode {
+    Arc::new(HamtNode {
         datamap,
         nodemap,
         leaves,
         children,
         structural_hash,
-    }))
+    })
 }
 
 /// Builds a full HAMT from an iterator of key/value entries.
 ///
 /// The caller supplies the `structural_key` (typically the room's `room_id.as_bytes()`)
 /// used for subtree hashing and deterministic routing within this namespace.
-///
-/// # Errors
-/// Returns [`HamtBuildError::HashCollision`] if the input exhausts the
-/// available trie depth before entries can be separated into distinct slots.
-pub fn build_hamt<K, V, I>(
-    structural_key: &[u8],
-    entries: I,
-) -> Result<NodePtr<K, V>, HamtBuildError>
+pub fn build_hamt<K, V, I>(structural_key: &[u8], entries: I) -> NodePtr<K, V>
 where
-    K: Hash + HamtCodec,
+    K: Eq + HamtCodec,
     V: HamtCodec,
     I: IntoIterator<Item = (K, V)>,
 {
-    build_hamt_with_key_hash(structural_key, entries, |key| {
+    build_entries(structural_key, entries, |key| {
         key_path_hash(structural_key, key)
     })
 }
 
-/// Builds a full HAMT from an iterator of key/value entries using a custom
-/// per-key path hash function.
-///
-/// Callers that build a tree with this function must use the matching custom
-/// lookup and mutation APIs:
-/// - [`HamtNode::get_with_key_hash`]
-/// - [`HamtNode::search_with_key_hash`]
-/// - [`HamtMutator::insert`]
-/// - [`HamtMutator::remove`]
-/// - [`HamtNode::get_by_path_hash`]
-/// - [`HamtNode::search_by_path_hash`]
-///
-/// The default [`HamtNode::get`], [`HamtNode::search`], [`insert`], and
-/// [`remove`] helpers derive their own routing hash using the same keyed
-/// structural hash used by [`build_hamt`], and are only correct for trees
-/// built by [`build_hamt`].
-///
-/// This is the most general builder entry point and is useful when a caller
-/// already has a pre-hashed key stream.
-///
-/// # Errors
-/// Returns [`HamtBuildError::HashCollision`] if the input exhausts the
-/// available trie depth before entries can be separated into distinct slots.
-pub fn build_hamt_with_key_hash<K, V, I, F>(
-    structural_key: &[u8],
-    entries: I,
-    mut key_hash: F,
-) -> Result<NodePtr<K, V>, HamtBuildError>
+/// Collects entries into a deduplicated [`BuildEntry`] list. Duplicate keys
+/// follow ordinary map semantics: the last value wins.
+fn build_entries<K, V, I, F>(structural_key: &[u8], entries: I, mut key_hash: F) -> NodePtr<K, V>
 where
-    K: Hash + HamtCodec,
+    K: Eq + HamtCodec,
     V: HamtCodec,
     I: IntoIterator<Item = (K, V)>,
     F: FnMut(&K) -> StructuralHash,
 {
-    let entries = entries
+    let mut all = entries
         .into_iter()
-        .map(|(key, value)| {
-            let path_hash = key_hash(&key);
-            BuildEntry {
-                key,
-                value,
-                path_hash,
-            }
+        .map(|(key, value)| BuildEntry {
+            path_hash: key_hash(&key),
+            key,
+            value,
         })
         .collect::<Vec<_>>();
-    build_node(structural_key, entries, 0)
+
+    // Equal keys always share a path hash, so a stable sort groups every
+    // duplicate run while preserving insertion order. That keeps the dedup
+    // work proportional to the number of actual duplicates — almost always
+    // zero or one — instead of scanning the whole input for every entry.
+    all.sort_by(|left, right| left.path_hash.cmp(&right.path_hash));
+
+    let mut unique = Vec::with_capacity(all.len());
+    let mut iter = all.into_iter().peekable();
+    while let Some(first) = iter.next() {
+        let run_hash = first.path_hash;
+        // The overwhelmingly common case: a hash that occurs exactly once
+        // (every non-duplicate key) needs no equality checks at all.
+        if iter.peek().is_none_or(|next| next.path_hash != run_hash) {
+            unique.push(first);
+            continue;
+        }
+
+        // A run can only be large when duplicate keys share a hash, or when
+        // distinct keys genuinely collide on all 256 bits.
+        let mut run = vec![first];
+        while let Some(entry) = iter.next_if(|next| next.path_hash == run_hash) {
+            run.push(entry);
+        }
+        let mut deduped: Vec<BuildEntry<K, V>> = Vec::with_capacity(run.len());
+        for entry in run {
+            if let Some(old) = deduped.iter_mut().find(|old| old.key == entry.key) {
+                // Keep the later key representation and value without shifting
+                // the run's vector. Stable hash sorting preserves input order.
+                old.key = entry.key;
+                old.value = entry.value;
+            } else {
+                deduped.push(entry);
+            }
+        }
+        unique.append(&mut deduped);
+    }
+
+    build_node(structural_key, unique, 0)
+}
+
+/// Builds a HAMT using a caller-supplied routing hash.
+///
+/// Only tests need this hook; production trees route with [`key_path_hash`].
+#[cfg(test)]
+fn build_hamt_with_routing<K, V, I, F>(
+    structural_key: &[u8],
+    entries: I,
+    key_hash: F,
+) -> NodePtr<K, V>
+where
+    K: Eq + HamtCodec,
+    V: HamtCodec,
+    I: IntoIterator<Item = (K, V)>,
+    F: FnMut(&K) -> StructuralHash,
+{
+    build_entries(structural_key, entries, key_hash)
 }
 
 /// Builds a root handle for a freshly constructed HAMT.
-///
-/// This is a convenience helper for downstream code that already knows the
-/// resolved lattice and wants both the tree and the root identity in one call.
-/// # Errors
-/// Returns the same build errors as [`build_hamt`].
 pub fn build_hamt_root_handle<K, V, I>(
     structural_key: &[u8],
     lattice: &crate::incremental::LtHash,
     entries: I,
-) -> Result<(RootHandle, NodePtr<K, V>), HamtBuildError>
+) -> (RootHandle, NodePtr<K, V>)
 where
-    K: Hash + HamtCodec,
+    K: Eq + HamtCodec,
     V: HamtCodec,
     I: IntoIterator<Item = (K, V)>,
 {
-    let root = build_hamt(structural_key, entries)?;
+    let root = build_hamt(structural_key, entries);
     let handle = RootHandle::from_lthash(root.structural_hash, lattice);
-    Ok((handle, root))
+    (handle, root)
 }
 
 /// Errors that can occur while incrementally mutating a HAMT via
 /// [`insert`] or [`remove`].
 #[derive(Debug, PartialEq, Eq)]
 pub enum HamtMutateError<E> {
-    /// Too many entries collided into the same slot after exhausting the
-    /// available hash depth.
-    HashCollision { depth: usize, bucket_size: usize },
     /// Traversal exceeded maximum allowable HAMT depth.
     MaxDepthExceeded { depth: usize },
+    /// A node's shape is illegal for the depth it occupies (for example, a
+    /// collision bucket above the routing limit). This can come from malformed
+    /// persisted data, so it is an error rather than a panic. Note that the
+    /// read-only lookup APIs have no error channel and report such a shape as
+    /// absent instead.
+    CorruptNode(&'static str),
     /// The resolver failed to load a lazy child that the mutation needed to
     /// descend into.
     Resolve(E),
@@ -844,13 +906,10 @@ where
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::HashCollision { depth, bucket_size } => write!(
-                f,
-                "hamt mutation hash collision at depth {depth} with bucket size {bucket_size}"
-            ),
             Self::MaxDepthExceeded { depth } => {
                 write!(f, "hamt mutation max depth exceeded at depth {depth}")
             }
+            Self::CorruptNode(reason) => write!(f, "hamt mutation corrupt node: {reason}"),
             Self::Resolve(err) => write!(f, "hamt mutation resolver failed: {err}"),
         }
     }
@@ -862,18 +921,8 @@ where
 {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
-            Self::HashCollision { .. } | Self::MaxDepthExceeded { .. } => None,
+            Self::MaxDepthExceeded { .. } | Self::CorruptNode(_) => None,
             Self::Resolve(err) => Some(err),
-        }
-    }
-}
-
-impl<E> From<HamtBuildError> for HamtMutateError<E> {
-    fn from(err: HamtBuildError) -> Self {
-        match err {
-            HamtBuildError::HashCollision { depth, bucket_size } => {
-                Self::HashCollision { depth, bucket_size }
-            }
         }
     }
 }
@@ -882,6 +931,7 @@ impl<E> From<HamtTraversalError<E>> for HamtMutateError<E> {
     fn from(err: HamtTraversalError<E>) -> Self {
         match err {
             HamtTraversalError::Resolve(e) => Self::Resolve(e),
+            HamtTraversalError::CorruptNode(reason) => Self::CorruptNode(reason),
             HamtTraversalError::MaxDepthExceeded { depth } => Self::MaxDepthExceeded { depth },
         }
     }
@@ -903,7 +953,7 @@ fn rebuild_node<K, V>(
     children: Vec<NodeRef<K, V>>,
 ) -> NodePtr<K, V>
 where
-    K: Hash + HamtCodec,
+    K: HamtCodec,
     V: HamtCodec,
 {
     let structural_hash =
@@ -953,7 +1003,7 @@ fn rebuild_with_child<K, V>(
     sink: &mut MutationSink<'_, K, V>,
 ) -> NodePtr<K, V>
 where
-    K: Hash + Clone + HamtCodec,
+    K: Clone + HamtCodec,
     V: HamtValue,
 {
     let mut children = node.children.clone();
@@ -969,8 +1019,36 @@ where
     new_node
 }
 
-// This adapter keeps the mutation call sites explicit, then immediately packs
-// the context arguments into `InsertCtx` for the recursive worker.
+#[cfg(test)]
+fn insert_node<K, V, F, E>(
+    node: &NodePtr<K, V>,
+    structural_key: &[u8],
+    key: K,
+    value: V,
+    path_hash: &StructuralHash,
+    depth: usize,
+    resolver: &mut F,
+) -> MutateResult<K, V, E>
+where
+    K: HamtKey,
+    V: HamtValue,
+    F: NodeResolver<K, V, E>,
+{
+    let mut key_hash = |key: &K| key_path_hash(structural_key, key);
+    let mut sink = |_: &NodePtr<K, V>| {};
+    insert_via_ctx(
+        node,
+        structural_key,
+        key,
+        value,
+        *path_hash,
+        depth,
+        &mut key_hash,
+        resolver,
+        &mut sink,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn insert_via_ctx<K, V, KeyHash, F, E>(
     node: &NodePtr<K, V>,
@@ -996,36 +1074,6 @@ where
         sink,
     };
     ctx.insert_node(node, key, value, path_hash, depth)
-}
-
-#[cfg(test)]
-fn insert_node<K, V, F, E>(
-    node: &NodePtr<K, V>,
-    structural_key: &[u8],
-    key: K,
-    value: V,
-    path_hash: &StructuralHash,
-    depth: usize,
-    resolver: &mut F,
-) -> MutateResult<K, V, E>
-where
-    K: HamtKey,
-    V: HamtValue,
-    F: NodeResolver<K, V, E>,
-{
-    let mut key_hash = |k: &K| key_path_hash(structural_key, k);
-    let mut sink = |_: &NodePtr<K, V>| {};
-    insert_via_ctx(
-        node,
-        structural_key,
-        key,
-        value,
-        *path_hash,
-        depth,
-        &mut key_hash,
-        resolver,
-        &mut sink,
-    )
 }
 
 struct InsertCtx<'a, K, V, KeyHash, F> {
@@ -1060,13 +1108,25 @@ where
     where
         F: NodeResolver<K, V, E>,
     {
-        if depth >= HAMT_MAX_DEPTH {
-            return Err(HamtMutateError::HashCollision {
-                depth,
-                bucket_size: node.leaves.len().saturating_add(1),
-            });
+        delta::check_node_depth(node, depth)?;
+        if node.is_collision() {
+            let old_value = node
+                .leaves
+                .iter()
+                .find(|(old_key, _)| old_key == &key)
+                .map(|(_, value)| value.clone());
+            let mut leaves = node
+                .leaves
+                .iter()
+                .filter(|(old_key, _)| old_key != &key)
+                .map(|(old_key, old_value)| (old_key.clone(), old_value.clone()))
+                .collect::<Vec<_>>();
+            leaves.push((key, value));
+            sort_collision_leaves(&mut leaves);
+            let new_node = rebuild_node(self.structural_key, 0, 0, leaves, Vec::new());
+            emit_node_to_sink(&new_node, self.sink);
+            return Ok((new_node, old_value));
         }
-
         let structural_key = self.structural_key;
         let slot = bucket_index(&path_hash, depth);
         let bit = 1_u32 << slot;
@@ -1151,7 +1211,7 @@ where
                     path_hash,
                 },
             ];
-            let child = build_node(self.structural_key, split_entries, next_depth)?;
+            let child = build_node(self.structural_key, split_entries, next_depth);
             emit_split_nodes_to_sink(&child, self.sink);
 
             let mut leaves = node.leaves.clone();
@@ -1197,14 +1257,10 @@ where
 /// (e.g. `LtHash`) need the displaced value to subtract it before adding
 /// the new one.
 ///
-/// This helper is only correct for trees built with [`build_hamt`]. If the
-/// tree was built with [`build_hamt_with_key_hash`], use
-/// [`HamtMutator::insert`] with the same routing function instead.
-///
 /// # Errors
-/// Returns [`HamtMutateError::HashCollision`] if the input exhausts the
-/// available trie depth, or [`HamtMutateError::Resolve`] if `resolver`
-/// fails to load a lazy child on the path to `key`.
+/// Returns [`HamtMutateError::Resolve`] if `resolver` fails to load a lazy
+/// child on the path to `key`. Returns [`HamtMutateError::CorruptNode`] or
+/// [`HamtMutateError::MaxDepthExceeded`] only for malformed trees.
 pub fn insert<K, V, F, E>(
     node: &NodePtr<K, V>,
     structural_key: &[u8],
@@ -1217,193 +1273,53 @@ where
     V: HamtValue,
     F: NodeResolver<K, V, E>,
 {
-    HamtMutator::new(|k: &K| key_path_hash(structural_key, k), resolver).insert(
+    let path_hash = key_path_hash(structural_key, &key);
+    let mut sink = |_: &NodePtr<K, V>| {};
+    let mut key_hash = |key: &K| key_path_hash(structural_key, key);
+    insert_via_ctx(
         node,
         structural_key,
         key,
         value,
+        path_hash,
+        0,
+        &mut key_hash,
+        resolver,
+        &mut sink,
     )
 }
 
-/// Carries the routing hash and lazy resolver shared by the HAMT mutation
-/// operations, so each entry point names the key/value/key-hash bounds once
-/// instead of repeating them.
-///
-/// The default-hash free functions ([`insert`], [`remove`],
-/// [`persist_mutations`], [`persist_chain`]) construct one internally; callers
-/// using a custom routing hash build one with [`HamtMutator::new`].
-pub struct HamtMutator<K, V, KeyHash, F> {
-    key_hash: KeyHash,
-    resolver: F,
-    _marker: core::marker::PhantomData<fn() -> (K, V)>,
-}
-
-impl<K, V, KeyHash, F> HamtMutator<K, V, KeyHash, F>
+/// Test-only insert with a caller-supplied routing hash. Production trees
+/// route with [`key_path_hash`] only, so this exists purely to force
+/// collisions in unit tests.
+#[cfg(test)]
+fn insert_with_routing<K, V, KeyHash, F, E>(
+    node: &NodePtr<K, V>,
+    structural_key: &[u8],
+    key: K,
+    value: V,
+    key_hash: &mut KeyHash,
+    resolver: &mut F,
+) -> MutateResult<K, V, E>
 where
     K: HamtKey,
     V: HamtValue,
     KeyHash: FnMut(&K) -> StructuralHash,
+    F: NodeResolver<K, V, E>,
 {
-    /// Creates a mutator from a routing hash and a lazy resolver.
-    pub fn new(key_hash: KeyHash, resolver: F) -> Self {
-        Self {
-            key_hash,
-            resolver,
-            _marker: core::marker::PhantomData,
-        }
-    }
-
-    /// Inserts or replaces a key/value pair using the caller-provided routing
-    /// hash. See [`insert`] for the default-hash variant.
-    ///
-    /// # Errors
-    /// Returns [`HamtMutateError::HashCollision`] if the input exhausts the
-    /// available trie depth, or [`HamtMutateError::Resolve`] if the resolver
-    /// fails to load a lazy child on the path to `key`.
-    pub fn insert<E>(
-        &mut self,
-        node: &NodePtr<K, V>,
-        structural_key: &[u8],
-        key: K,
-        value: V,
-    ) -> MutateResult<K, V, E>
-    where
-        F: NodeResolver<K, V, E>,
-    {
-        let Self {
-            key_hash, resolver, ..
-        } = self;
-        let path_hash = key_hash(&key);
-        let mut sink = |_: &NodePtr<K, V>| {};
-        insert_via_ctx(
-            node,
-            structural_key,
-            key,
-            value,
-            path_hash,
-            0,
-            key_hash,
-            resolver,
-            &mut sink,
-        )
-    }
-
-    /// Removes `key` using the caller-provided routing hash. See [`remove`] for
-    /// the default-hash variant.
-    ///
-    /// # Errors
-    /// Returns [`HamtMutateError::Resolve`] if the resolver fails to load a
-    /// lazy child on the path to `key`.
-    pub fn remove<E>(
-        &mut self,
-        node: &NodePtr<K, V>,
-        structural_key: &[u8],
-        key: &K,
-    ) -> MutateResult<K, V, E>
-    where
-        F: NodeResolver<K, V, E>,
-    {
-        let Self {
-            key_hash, resolver, ..
-        } = self;
-        let path_hash = key_hash(key);
-        let mut sink = |_: &NodePtr<K, V>| {};
-        remove_spine(
-            node,
-            structural_key,
-            key,
-            &path_hash,
-            |leaf_key| bucket_index(&key_hash(leaf_key), 0),
-            resolver,
-            &mut sink,
-        )
-    }
-
-    /// Persists a batch of mutations producing a single published final root.
-    /// See [`persist_mutations`] for the publication contract.
-    ///
-    /// # Errors
-    /// Returns [`HamtMutateError`] if the resolver fails to load a lazy child
-    /// or depth is exhausted.
-    pub fn persist_mutations<E, I>(
-        &mut self,
-        prev_root: &NodePtr<K, V>,
-        structural_key: &[u8],
-        mutations: I,
-    ) -> PersistMutationsResult<K, V, E>
-    where
-        V: Hash,
-        I: IntoIterator<Item = (K, Option<V>)>,
-        F: NodeResolver<K, V, E>,
-    {
-        let mut current_root = prev_root.clone();
-        let mut displaced_vec = Vec::new();
-
-        for (key, opt_val) in mutations {
-            let (next_root, displaced) = if let Some(val) = opt_val {
-                self.insert(&current_root, structural_key, key, val)?
-            } else {
-                self.remove(&current_root, structural_key, &key)?
-            };
-            displaced_vec.push(displaced);
-            current_root = next_root;
-        }
-
-        finalize_persisted_mutations(prev_root, current_root, displaced_vec, &mut self.resolver)
-    }
-
-    /// Persists a sequence of mutations where every intermediate step publishes
-    /// a distinct root. See [`persist_chain`] for the publication contract.
-    ///
-    /// # Errors
-    /// Returns [`HamtMutateError`] if the resolver fails to load a lazy child
-    /// or depth is exhausted.
-    pub fn persist_chain<E, I>(
-        &mut self,
-        prev_root: &NodePtr<K, V>,
-        structural_key: &[u8],
-        mutations: I,
-    ) -> Result<Vec<ChainStep<K, V>>, HamtMutateError<E>>
-    where
-        V: Hash,
-        I: IntoIterator<Item = (K, Option<V>)>,
-        F: NodeResolver<K, V, E>,
-    {
-        let mut steps = Vec::new();
-        let mut current_root = prev_root.clone();
-
-        for (key, opt_val) in mutations {
-            let (next_root, displaced, created) = persist_mutation_with_key_hash(
-                &current_root,
-                structural_key,
-                key,
-                opt_val,
-                &mut self.key_hash,
-                &mut self.resolver,
-            )?;
-            steps.push(ChainStep {
-                root_hash: next_root.structural_hash,
-                root: next_root.clone(),
-                displaced,
-                created,
-            });
-            current_root = next_root;
-        }
-
-        Ok(steps)
-    }
-}
-
-/// Builds a mutator that routes keys with the default keyed structural hash.
-fn default_mutator<'a, K, V, F>(
-    structural_key: &'a [u8],
-    resolver: &'a mut F,
-) -> HamtMutator<K, V, impl FnMut(&K) -> StructuralHash + 'a, &'a mut F>
-where
-    K: HamtKey,
-    V: HamtValue,
-{
-    HamtMutator::new(move |k: &K| key_path_hash(structural_key, k), resolver)
+    let path_hash = key_hash(&key);
+    let mut sink = |_: &NodePtr<K, V>| {};
+    insert_via_ctx(
+        node,
+        structural_key,
+        key,
+        value,
+        path_hash,
+        0,
+        key_hash,
+        resolver,
+        &mut sink,
+    )
 }
 
 /// What remains of a subtree after a leaf was removed from it.
@@ -1431,7 +1347,7 @@ fn finalize_after_removal<K, V>(
     children: Vec<NodeRef<K, V>>,
 ) -> RemoveOutcome<K, V>
 where
-    K: Hash + HamtCodec,
+    K: HamtCodec,
     V: HamtCodec,
 {
     if nodemap == 0 {
@@ -1461,21 +1377,20 @@ struct RemoveCtx<'a, K, V, F> {
     sink: &'a mut MutationSink<'a, K, V>,
 }
 
-fn remove_spine<K, V, Q, F, Slot, E>(
+fn remove_spine<K, V, Q, F, E>(
     node: &NodePtr<K, V>,
     structural_key: &[u8],
     key: &Q,
     path_hash: &StructuralHash,
-    root_slot_for_leaf: Slot,
+    leaf_root_slot: impl FnOnce(&K) -> usize,
     resolver: &mut F,
     sink: &mut MutationSink<'_, K, V>,
 ) -> MutateResult<K, V, E>
 where
-    K: Hash + Eq + Borrow<Q> + Clone + HamtCodec,
+    K: Eq + Borrow<Q> + Clone + HamtCodec,
     V: HamtValue,
     Q: Eq + ?Sized,
     F: NodeResolver<K, V, E>,
-    Slot: FnMut(&K) -> usize,
 {
     let (outcome, old_value) = {
         let mut ctx = RemoveCtx {
@@ -1485,7 +1400,7 @@ where
         };
         remove_node_with_ctx(node, key, path_hash, 0, &mut ctx)?
     };
-    let new_root = finalize_remove_root(structural_key, outcome, root_slot_for_leaf, sink);
+    let new_root = finalize_remove_root(structural_key, outcome, leaf_root_slot, sink);
     Ok((new_root, old_value))
 }
 
@@ -1499,13 +1414,10 @@ where
 ///
 /// Returns the new root and the removed value, if `key` was present.
 ///
-/// This helper is only correct for trees built with [`build_hamt`]. If the
-/// tree was built with [`build_hamt_with_key_hash`], use
-/// [`HamtMutator::remove`] with the same routing function instead.
-///
 /// # Errors
 /// Returns [`HamtMutateError::Resolve`] if `resolver` fails to load a lazy
-/// child on the path to `key`.
+/// child on the path to `key`. Returns [`HamtMutateError::CorruptNode`] or
+/// [`HamtMutateError::MaxDepthExceeded`] only for malformed trees.
 pub fn remove<K, V, Q, F, E>(
     node: &NodePtr<K, V>,
     structural_key: &[u8],
@@ -1513,9 +1425,9 @@ pub fn remove<K, V, Q, F, E>(
     resolver: &mut F,
 ) -> MutateResult<K, V, E>
 where
-    K: Hash + Eq + Borrow<Q> + Clone + HamtCodec,
+    K: Eq + Borrow<Q> + Clone + HamtCodec,
     V: HamtValue,
-    Q: Hash + Eq + ?Sized,
+    Q: HamtRoutingKey + Eq + ?Sized,
     F: NodeResolver<K, V, E>,
 {
     let path_hash = key_path_hash(structural_key, key);
@@ -1531,6 +1443,37 @@ where
     )
 }
 
+/// Test-only remove with a caller-supplied routing hash. Production trees
+/// route with [`key_path_hash`] only.
+#[cfg(test)]
+fn remove_with_routing<K, V, Q, KeyHash, F, E>(
+    node: &NodePtr<K, V>,
+    structural_key: &[u8],
+    key: &Q,
+    key_hash: &mut KeyHash,
+    resolver: &mut F,
+) -> MutateResult<K, V, E>
+where
+    K: Eq + Borrow<Q> + Clone + HamtCodec,
+    V: HamtValue,
+    Q: Eq + Borrow<K> + ?Sized,
+    KeyHash: FnMut(&K) -> StructuralHash,
+    F: NodeResolver<K, V, E>,
+{
+    let path_hash = key_hash(key.borrow());
+    let mut sink = |_: &NodePtr<K, V>| {};
+    remove_spine(
+        node,
+        structural_key,
+        key,
+        &path_hash,
+        |leaf_key| bucket_index(&key_hash(leaf_key), 0),
+        resolver,
+        &mut sink,
+    )
+}
+
+#[allow(clippy::too_many_lines)] // one linear descent with a collision special case
 fn remove_node_with_ctx<K, V, Q, F, E>(
     node: &NodePtr<K, V>,
     key: &Q,
@@ -1539,15 +1482,41 @@ fn remove_node_with_ctx<K, V, Q, F, E>(
     ctx: &mut RemoveCtx<'_, K, V, F>,
 ) -> RemoveStepResult<K, V, E>
 where
-    K: Hash + Eq + Borrow<Q> + Clone + HamtCodec,
+    K: Eq + Borrow<Q> + Clone + HamtCodec,
     V: HamtValue,
     Q: Eq + ?Sized,
     F: NodeResolver<K, V, E>,
 {
-    if depth >= HAMT_MAX_DEPTH {
-        return Err(HamtMutateError::MaxDepthExceeded { depth });
+    delta::check_node_depth(node, depth)?;
+    if node.is_collision() {
+        // A public-field bucket can be built without the encoder's canonical
+        // order check. Reject it here: rebuilding a still-unsorted bucket
+        // would otherwise panic inside `encode_v1_parts`.
+        codec::check_collision_key_order(&node.leaves).map_err(HamtMutateError::CorruptNode)?;
+        let Some(index) = node
+            .leaves
+            .iter()
+            .position(|(stored, _)| stored.borrow() == key)
+        else {
+            return Ok((RemoveOutcome::Node(node.clone()), None));
+        };
+        let old_value = node.leaves[index].1.clone();
+        let mut leaves = node.leaves.clone();
+        leaves.remove(index);
+        let outcome = match leaves.len() {
+            0 => RemoveOutcome::Empty,
+            1 => {
+                let (key, value) = leaves.pop().expect("checked len == 1");
+                RemoveOutcome::Leaf(key, value)
+            }
+            _ => {
+                let new_node = rebuild_node(ctx.structural_key, 0, 0, leaves, Vec::new());
+                emit_node_to_sink(&new_node, ctx.sink);
+                RemoveOutcome::Node(new_node)
+            }
+        };
+        return Ok((outcome, Some(old_value)));
     }
-
     let slot = bucket_index(path_hash, depth);
     let bit = 1_u32 << slot;
     let structural_key = ctx.structural_key;
@@ -1583,9 +1552,6 @@ where
     let child = resolve_child_ref(&node.children[idx], ctx.resolver)?;
 
     let next_depth = depth.saturating_add(1);
-    if next_depth >= HAMT_MAX_DEPTH {
-        return Err(HamtMutateError::MaxDepthExceeded { depth: next_depth });
-    }
     let (child_outcome, old_value) = remove_node_with_ctx(&child, key, path_hash, next_depth, ctx)?;
     if old_value.is_none() {
         return Ok((RemoveOutcome::Node(node.clone()), None));
@@ -1630,16 +1596,15 @@ where
     }
 }
 
-fn finalize_remove_root<K, V, F>(
+fn finalize_remove_root<K, V>(
     structural_key: &[u8],
     outcome: RemoveOutcome<K, V>,
-    mut root_slot_for_leaf: F,
+    leaf_root_slot: impl FnOnce(&K) -> usize,
     sink: &mut MutationSink<'_, K, V>,
 ) -> NodePtr<K, V>
 where
-    K: Hash + Clone + HamtCodec,
+    K: Clone + HamtCodec,
     V: HamtValue,
-    F: FnMut(&K) -> usize,
 {
     match outcome {
         RemoveOutcome::Empty => {
@@ -1648,7 +1613,7 @@ where
             root
         }
         RemoveOutcome::Leaf(leaf_key, leaf_value) => {
-            let root_slot = root_slot_for_leaf(&leaf_key);
+            let root_slot = leaf_root_slot(&leaf_key);
             let leaves = vec![(leaf_key, leaf_value)];
             let root = rebuild_node(structural_key, 1_u32 << root_slot, 0, leaves, Vec::new());
             emit_node_to_sink(&root, sink);
@@ -1686,15 +1651,6 @@ pub type PersistMutationsResult<K, V, E> = Result<
 /// This is for a single published state group. The returned `created` nodes must be written to
 /// storage before publishing the state group root pointer.
 ///
-/// # Custom-hash roots
-/// This always routes with the default keyed structural hash, the same one
-/// [`build_hamt`] uses. It is only correct for trees built by [`build_hamt`]
-/// (or `prev_root`s produced by a prior call to this function). Do not call
-/// this on a `prev_root` built by [`build_hamt_with_key_hash`] — it will
-/// route with the wrong hash, silently missing existing entries and leaving
-/// the tree inconsistent. Use [`persist_mutation_with_key_hash`] or the
-/// [`HamtMutator`] methods for those trees instead.
-///
 /// # Errors
 /// Returns [`HamtMutateError`] if `resolver` fails to load a lazy child or depth is exhausted.
 pub fn persist_mutation<K, V, F, E>(
@@ -1706,42 +1662,10 @@ pub fn persist_mutation<K, V, F, E>(
 ) -> PersistMutationResult<K, V, E>
 where
     K: HamtKey,
-    V: HamtValue + Hash,
+    V: HamtValue,
     F: NodeResolver<K, V, E>,
 {
-    persist_mutation_with_key_hash(
-        prev_root,
-        structural_key,
-        key,
-        value,
-        |k: &K| key_path_hash(structural_key, k),
-        resolver,
-    )
-}
-
-/// [`persist_mutation`] equivalent for trees built with
-/// [`build_hamt_with_key_hash`]: routes with the caller-supplied `key_hash`
-/// instead of the default keyed structural hash, so it is correct for trees
-/// whose routing hash differs from [`build_hamt`]'s.
-///
-/// See [`persist_mutation`] for the return value and publication contract.
-///
-/// # Errors
-/// Returns [`HamtMutateError`] if `resolver` fails to load a lazy child or depth is exhausted.
-pub fn persist_mutation_with_key_hash<K, V, KeyHash, F, E>(
-    prev_root: &NodePtr<K, V>,
-    structural_key: &[u8],
-    key: K,
-    value: Option<V>,
-    mut key_hash: KeyHash,
-    resolver: &mut F,
-) -> PersistMutationResult<K, V, E>
-where
-    K: HamtKey,
-    V: HamtValue + Hash,
-    KeyHash: FnMut(&K) -> StructuralHash,
-    F: NodeResolver<K, V, E>,
-{
+    let path_hash = key_path_hash(structural_key, &key);
     let mut created = Vec::new();
     let (new_root, displaced) = {
         let mut sink = |node: &NodePtr<K, V>| {
@@ -1751,7 +1675,7 @@ where
             ));
         };
         if let Some(val) = value {
-            let path_hash = key_hash(&key);
+            let mut key_hash = |leaf_key: &K| key_path_hash(structural_key, leaf_key);
             insert_via_ctx(
                 prev_root,
                 structural_key,
@@ -1764,13 +1688,12 @@ where
                 &mut sink,
             )?
         } else {
-            let path_hash = key_hash(&key);
             remove_spine(
                 prev_root,
                 structural_key,
                 &key,
                 &path_hash,
-                |leaf_key: &K| bucket_index(&key_hash(leaf_key), 0),
+                |leaf_key| bucket_index(&key_path_hash(structural_key, leaf_key), 0),
                 resolver,
                 &mut sink,
             )?
@@ -1792,7 +1715,7 @@ fn finalize_persisted_mutations<K, V, F, E>(
 ) -> PersistMutationsResult<K, V, E>
 where
     K: HamtKey,
-    V: HamtValue + Hash,
+    V: HamtValue,
     F: NodeResolver<K, V, E>,
 {
     if current_root.structural_hash == prev_root.structural_hash {
@@ -1836,12 +1759,6 @@ where
 /// Callers using lazy resolvers should pass a memoizing resolver (or use [`persist_chain`])
 /// to avoid repeated backend fetches during the end-of-batch diff pass.
 ///
-/// # Custom-hash roots
-/// Same default-hash-only routing as [`persist_mutation`]; see its
-/// "Custom-hash roots" section — do not call this on a
-/// [`build_hamt_with_key_hash`] tree. Use
-/// [`HamtMutator::persist_mutations`] instead.
-///
 /// # Errors
 /// Returns [`HamtMutateError`] if `resolver` fails to load a lazy child or depth is exhausted.
 pub fn persist_mutations<K, V, I, F, E>(
@@ -1852,15 +1769,22 @@ pub fn persist_mutations<K, V, I, F, E>(
 ) -> PersistMutationsResult<K, V, E>
 where
     K: HamtKey,
-    V: HamtValue + Hash,
+    V: HamtValue,
     I: IntoIterator<Item = (K, Option<V>)>,
     F: NodeResolver<K, V, E>,
 {
-    default_mutator(structural_key, resolver).persist_mutations(
-        prev_root,
-        structural_key,
-        mutations,
-    )
+    let mut current_root = prev_root.clone();
+    let mut displaced_vec = Vec::new();
+    for (key, opt_val) in mutations {
+        let (next_root, displaced) = if let Some(val) = opt_val {
+            insert(&current_root, structural_key, key, val, resolver)?
+        } else {
+            remove(&current_root, structural_key, &key, resolver)?
+        };
+        displaced_vec.push(displaced);
+        current_root = next_root;
+    }
+    finalize_persisted_mutations(prev_root, current_root, displaced_vec, resolver)
 }
 
 /// Persists a sequence of mutations where EVERY intermediate step publishes a distinct root.
@@ -1873,12 +1797,6 @@ where
 /// For each step $i$, the `step.created` nodes must be written to storage before publishing
 /// the corresponding state group root.
 ///
-/// # Custom-hash roots
-/// Same default-hash-only routing as [`persist_mutation`]; see its
-/// "Custom-hash roots" section — do not call this on a
-/// [`build_hamt_with_key_hash`] tree. Use [`HamtMutator::persist_chain`]
-/// instead.
-///
 /// # Errors
 /// Returns [`HamtMutateError`] if `resolver` fails to load a lazy child or depth is exhausted.
 pub fn persist_chain<K, V, I, F, E>(
@@ -1889,11 +1807,24 @@ pub fn persist_chain<K, V, I, F, E>(
 ) -> Result<Vec<ChainStep<K, V>>, HamtMutateError<E>>
 where
     K: HamtKey,
-    V: HamtValue + Hash,
+    V: HamtValue,
     I: IntoIterator<Item = (K, Option<V>)>,
     F: NodeResolver<K, V, E>,
 {
-    default_mutator(structural_key, resolver).persist_chain(prev_root, structural_key, mutations)
+    let mut steps = Vec::new();
+    let mut current_root = prev_root.clone();
+    for (key, opt_val) in mutations {
+        let (next_root, displaced, created) =
+            persist_mutation(&current_root, structural_key, key, opt_val, resolver)?;
+        steps.push(ChainStep {
+            root_hash: next_root.structural_hash,
+            root: next_root.clone(),
+            displaced,
+            created,
+        });
+        current_root = next_root;
+    }
+    Ok(steps)
 }
 
 /// Descends into a batch of persisted node byte slices for their targeted keys.
@@ -1902,7 +1833,7 @@ where
 /// target key hashes for each fetched node. All entries in a single `nodes_and_keys`
 /// call must share the same `depth` (the current level of breadth-first descent).
 /// Each node is evaluated only against the keys that routed to it at that depth.
-/// `key_hash_fn` computes the `KeyPathHash` of a decoded leaf key to verify exact matches.
+/// The default keyed path hash verifies exact leaf matches.
 ///
 /// # Depth Contract
 /// All tuples in `nodes_and_keys` must specify the same `depth` level. Successful
@@ -1912,21 +1843,47 @@ where
 /// A key is reported in `absent` ONLY when:
 /// 1. Its routed slot bit is clear in both `datamap` and `nodemap`.
 /// 2. Its routed slot bit is set in `datamap`, but the decoded leaf key at that slot has a
-///    different path hash. (Note: this is sound because this HAMT rejects multi-leaf bucket
-///    overflow with [`HamtMutateError::HashCollision`] rather than storing collision lists).
+///    different path hash.
+///
+/// A terminal collision bucket is not an absence boundary: a bucket only occurs after every
+/// routing slot is consumed, so every request must carry the bucket's complete 256-bit route.
+/// A mismatch is reported as corruption, never as `absent`.
+///
+/// An ordinary leaf is likewise validated against the route that reached it: its key must
+/// select every ancestor slot and its own slot under `depth`. A leaf stored below a subtree
+/// its key never selects is corruption, not a reason to report the request as `absent`. (An
+/// internal node with no leaves cannot reveal ancestor misplacement from its own bytes alone,
+/// so this check applies whenever a leaf or collision bucket is reached.)
 ///
 /// # Errors
 /// Returns [`DescendError::Decode`] if any node byte slice fails v1 parsing, or
-/// [`DescendError::CorruptNode`] if internal bitmap invariants are violated.
-pub fn descend_level<K, V, KeyHash>(
+/// [`DescendError::CorruptNode`] if internal bitmap invariants are violated, an ordinary leaf
+/// or collision bucket does not match its trie path, or a request does not match its terminal
+/// collision bucket's full route.
+pub fn descend_level<K, V>(
     structural_key: &[u8],
     nodes_and_keys: &[(StructuralHash, &[u8], usize, &[KeyPathHash])],
-    mut key_hash_fn: KeyHash,
-) -> Result<DescendResult<V>, DescendError>
+) -> Result<DescendResult<K, V>, DescendError>
 where
     K: HamtKey,
-    V: HamtValue + Hash,
-    KeyHash: FnMut(&K) -> KeyPathHash,
+    V: HamtValue,
+{
+    descend_level_impl(structural_key, nodes_and_keys, |key| {
+        key_path_hash(structural_key, key)
+    })
+}
+
+/// Routing-parameterized implementation of [`descend_level`], so tests can
+/// force terminal collision buckets with a synthetic routing hash.
+fn descend_level_impl<K, V, F>(
+    structural_key: &[u8],
+    nodes_and_keys: &[(StructuralHash, &[u8], usize, &[KeyPathHash])],
+    mut key_hash: F,
+) -> Result<DescendResult<K, V>, DescendError>
+where
+    K: HamtKey,
+    V: HamtValue,
+    F: FnMut(&K) -> StructuralHash,
 {
     if let Some(&(_, _, first_depth, _)) = nodes_and_keys.first() {
         // Runtime check: mixed-depth entries would merge requests from different
@@ -1951,12 +1908,41 @@ where
             .map_err(|_| {
                 DescendError::CorruptNode("decoded node contents do not match requested node hash")
             })?;
+        if depth > HAMT_MAX_DEPTH || (depth == HAMT_MAX_DEPTH && !node.is_collision()) {
+            return Err(DescendError::CorruptNode(
+                "HAMT node shape is invalid at this depth",
+            ));
+        }
+        if node.is_collision() && depth != HAMT_MAX_DEPTH {
+            return Err(DescendError::CorruptNode("misplaced collision bucket"));
+        }
+        let collision_path_hash = if node.is_collision() {
+            Some(
+                collision_route_hash(&node.leaves, &mut key_hash)
+                    .map_err(DescendError::CorruptNode)?,
+            )
+        } else {
+            None
+        };
 
         for &req_hash in target_keys {
-            if depth >= HAMT_MAX_DEPTH {
-                return Err(DescendError::CorruptNode(
-                    "HAMT depth exceeds routing limit",
-                ));
+            if let Some(collision_path_hash) = collision_path_hash {
+                // A bucket only sits at `HAMT_MAX_DEPTH`, after every routing
+                // slot has been consumed. Any request reaching it must carry
+                // the bucket's complete 256-bit route; a difference anywhere
+                // means the request did not route here, so the placement is
+                // corrupt rather than the key merely absent.
+                if collision_path_hash != req_hash {
+                    return Err(DescendError::CorruptNode(
+                        "collision bucket does not match its trie path",
+                    ));
+                }
+                found.extend(
+                    node.leaves
+                        .iter()
+                        .map(|(leaf_key, value)| (req_hash, leaf_key.clone(), value.clone())),
+                );
+                continue;
             }
             let slot = bucket_index(&req_hash, depth);
             let bit = 1_u32 << slot;
@@ -1967,20 +1953,15 @@ where
                     .leaves
                     .get(leaf_idx)
                     .ok_or(DescendError::CorruptNode("leaf index out of bounds"))?;
-                // Lazy slot validation: only check the leaf being read, not
-                // the entire datamap. In a correct CHAMP HAMT, a leaf at
-                // slot `s` must satisfy bucket_index(key_hash(leaf_key), depth) == s.
-                if depth < HAMT_MAX_DEPTH {
-                    let expected_slot = bucket_index(&key_hash_fn(leaf_key), depth);
-                    if expected_slot != slot {
-                        return Err(DescendError::CorruptNode("leaf routed to wrong slot"));
-                    }
-                }
-                if key_hash_fn(leaf_key) == req_hash {
-                    found.push((req_hash, val.clone()));
+                let leaf_hash = key_hash(leaf_key);
+                validate_leaf_route_prefix(&leaf_hash, &req_hash, depth)
+                    .map_err(DescendError::CorruptNode)?;
+                if leaf_hash == req_hash {
+                    found.push((req_hash, leaf_key.clone(), val.clone()));
                 } else {
                     // Different leaf occupies this exact slot: key is proven absent
-                    // (Sound because this HAMT rejects bucket overflow with HashCollision)
+                    // The path hash matches but the leaf key may not; a MTHC terminal bucket
+                    // is handled above because path hashes alone cannot distinguish its leaves.
                     absent.push(req_hash);
                 }
             } else if (node.nodemap & bit) != 0 {

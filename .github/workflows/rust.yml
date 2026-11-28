@@ -20,9 +20,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - rust: "1.88.0"
+          - rust: "1.89.0"
             label: "MSRV (default features)"
-          - rust: "1.88.0"
+          - rust: "1.89.0"
             label: "cli feature"
     steps:
       - uses: actions/checkout@v4
@@ -45,7 +45,7 @@ jobs:
           rustc --version
           cargo --version
 
-      # rustc 1.88.0 is the workspace MSRV; both matrix rows share it and are
+      # rustc 1.89.0 is the workspace MSRV; both matrix rows share it and are
       # distinguished by `matrix.label`, not `matrix.rust`.
       - name: Lint (default features)
         if: matrix.label == 'MSRV (default features)'
@@ -97,16 +97,47 @@ jobs:
           rustc --version
           cargo --version
 
-      - name: Install native dependencies
-        run:
-          sudo apt-get update && sudo apt-get install --no-install-recommends -y
-          pkg-config libdbus-1-dev
-
       - name: Lint
         run: CARGO_FEATURE_ARGS="--locked --all-features" make lint
 
       - name: Test
         run: CARGO_FEATURE_ARGS="--locked --all-features" make rust/test
+
+  i686:
+    name: Rust 1.89.0 i686 (32-bit)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.89.0"
+          targets: i686-unknown-linux-gnu
+          components: clippy
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: rust-1.89.0-i686
+
+      # Needed to link 32-bit test binaries on the 64-bit runner.
+      - name: Install 32-bit linker support
+        run: sudo apt-get update && sudo apt-get install -y gcc-multilib
+
+      - name: Lint (i686)
+        run:
+          cargo clippy --locked --workspace --target i686-unknown-linux-gnu
+          --all-targets --all-features -- -D warnings
+
+      - name: Test (i686)
+        run:
+          cargo test --locked --workspace --lib --tests --target
+          i686-unknown-linux-gnu --all-features
 
   checks:
     name: Format, Coverage, and Summary
@@ -130,8 +161,6 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y pkg-config libdbus-1-dev
           pip install pre-commit
           npm install -g prettier@3.6.2 markdownlint-cli@0.43.0
           cargo install cargo-sort
